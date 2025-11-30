@@ -422,10 +422,10 @@ fn deserialize_named_struct(
             {
                 let state = self.state;
                 #(#init_locals)*
-                while let ::core::option::Option::Some(key) =
+                while let ::core::option::Option::Some(__key) =
                     _serde::de::MapAccess::next_key::<__Field>(&mut __map)?
                 {
-                    match key {
+                    match __key {
                         #(#match_arms)*
                         __Field::__Ignore => {
                             let _ = _serde::de::MapAccess::next_value::<_serde::de::IgnoredAny>(&mut __map)?;
