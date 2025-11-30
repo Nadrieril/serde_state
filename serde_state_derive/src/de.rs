@@ -28,49 +28,22 @@ fn derive_struct(
     data: &DataStruct,
     attrs: &ContainerAttributes,
 ) -> syn::Result<TokenStream> {
-    let (impl_generics, ty_generics, where_clause, state_tokens, uses_generic_state) =
-        match &attrs.state_type {
-            Some(state_ty) => {
-                let generics_with_lifetime = add_de_lifetime(&input.generics);
-                let (impl_generics_ref, _, _) = generics_with_lifetime.split_for_impl();
-                let impl_generics = quote!(#impl_generics_ref);
-                let (_, ty_generics_ref, _) = input.generics.split_for_impl();
-                let ty_generics = quote!(#ty_generics_ref);
-                let mut where_clause = input.generics.where_clause.clone();
-                let state_tokens = quote!(#state_ty);
-                let field_types = collect_field_types_from_fields(&data.fields);
-                add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
-                (
-                    impl_generics,
-                    ty_generics,
-                    where_clause,
-                    state_tokens,
-                    false,
-                )
-            }
-            None => {
-                let impl_generics_with_state = add_state_param(&input.generics);
-                let (impl_generics_ref, _, _) = impl_generics_with_state.split_for_impl();
-                let impl_generics = quote!(#impl_generics_ref);
-                let (_, ty_generics_ref, _) = input.generics.split_for_impl();
-                let ty_generics = quote!(#ty_generics_ref);
-                let mut where_clause = input.generics.where_clause.clone();
-                let state_tokens = quote!(__State);
-                let field_types = collect_field_types_from_fields(&data.fields);
-                add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
-                (impl_generics, ty_generics, where_clause, state_tokens, true)
-            }
-        };
-    let where_clause_tokens = match &where_clause {
-        Some(clause) => quote!(#clause),
-        None => TokenStream::new(),
-    };
+    let impl_generics_with_state = add_state_param(&input.generics);
+    let (impl_generics_ref, _, _) = impl_generics_with_state.split_for_impl();
+    let impl_generics = quote!(#impl_generics_ref);
+    let (_, ty_generics_ref, _) = input.generics.split_for_impl();
+    let ty_generics = quote!(#ty_generics_ref);
+    let mut where_clause = input.generics.where_clause.clone();
+    let state_tokens = quote!(__State);
+    let field_types = collect_field_types_from_fields(&data.fields);
+    add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    let where_clause_tokens = quote_where_clause(&where_clause);
     let ident = &input.ident;
 
     let body = if attrs.transparent {
         deserialize_transparent(ident, &data.fields, &state_tokens)?
     } else {
-        deserialize_struct_body(ident, &data.fields, &state_tokens, uses_generic_state)
+        deserialize_struct_body(ident, &data.fields, &state_tokens, &where_clause)
     };
 
     Ok(quote! {
@@ -92,48 +65,21 @@ fn derive_struct(
 fn derive_enum(
     input: &DeriveInput,
     data: &DataEnum,
-    attrs: &ContainerAttributes,
+    _attrs: &ContainerAttributes,
 ) -> syn::Result<TokenStream> {
-    let (impl_generics, ty_generics, where_clause, state_tokens, uses_generic_state) =
-        match &attrs.state_type {
-            Some(state_ty) => {
-                let generics_with_lifetime = add_de_lifetime(&input.generics);
-                let (impl_generics_ref, _, _) = generics_with_lifetime.split_for_impl();
-                let impl_generics = quote!(#impl_generics_ref);
-                let (_, ty_generics_ref, _) = input.generics.split_for_impl();
-                let ty_generics = quote!(#ty_generics_ref);
-                let mut where_clause = input.generics.where_clause.clone();
-                let state_tokens = quote!(#state_ty);
-                let field_types = collect_field_types_from_enum(data);
-                add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
-                (
-                    impl_generics,
-                    ty_generics,
-                    where_clause,
-                    state_tokens,
-                    false,
-                )
-            }
-            None => {
-                let impl_generics_with_state = add_state_param(&input.generics);
-                let (impl_generics_ref, _, _) = impl_generics_with_state.split_for_impl();
-                let impl_generics = quote!(#impl_generics_ref);
-                let (_, ty_generics_ref, _) = input.generics.split_for_impl();
-                let ty_generics = quote!(#ty_generics_ref);
-                let mut where_clause = input.generics.where_clause.clone();
-                let state_tokens = quote!(__State);
-                let field_types = collect_field_types_from_enum(data);
-                add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
-                (impl_generics, ty_generics, where_clause, state_tokens, true)
-            }
-        };
-    let where_clause_tokens = match &where_clause {
-        Some(clause) => quote!(#clause),
-        None => TokenStream::new(),
-    };
+    let impl_generics_with_state = add_state_param(&input.generics);
+    let (impl_generics_ref, _, _) = impl_generics_with_state.split_for_impl();
+    let impl_generics = quote!(#impl_generics_ref);
+    let (_, ty_generics_ref, _) = input.generics.split_for_impl();
+    let ty_generics = quote!(#ty_generics_ref);
+    let mut where_clause = input.generics.where_clause.clone();
+    let state_tokens = quote!(__State);
+    let field_types = collect_field_types_from_enum(data);
+    add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    let where_clause_tokens = quote_where_clause(&where_clause);
     let ident = &input.ident;
 
-    let body = deserialize_enum_body(ident, data, &state_tokens, uses_generic_state);
+    let body = deserialize_enum_body(ident, data, &state_tokens, &where_clause);
 
     Ok(quote! {
         #[automatically_derived]
@@ -186,14 +132,12 @@ fn deserialize_struct_body(
     ident: &syn::Ident,
     fields: &Fields,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     match fields {
-        Fields::Named(named) => {
-            deserialize_named_struct(ident, named, state_tokens, uses_generic_state)
-        }
+        Fields::Named(named) => deserialize_named_struct(ident, named, state_tokens, where_clause),
         Fields::Unnamed(unnamed) => {
-            deserialize_unnamed_struct(ident, unnamed, state_tokens, uses_generic_state)
+            deserialize_unnamed_struct(ident, unnamed, state_tokens, where_clause)
         }
         Fields::Unit => deserialize_unit_struct(ident),
     }
@@ -203,7 +147,7 @@ fn deserialize_named_struct(
     ident: &syn::Ident,
     fields: &FieldsNamed,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let field_names: Vec<String> = fields
         .named
@@ -315,80 +259,40 @@ fn deserialize_named_struct(
         quote!(#ident { #(#pairs),* })
     };
 
-    let visitor_struct = if uses_generic_state {
-        quote! {
-            struct __Visitor<'state, __State: ?Sized> {
-                state: &'state __State,
-            }
-        }
-    } else {
-        quote! {
-            struct __Visitor<'state> {
-                state: &'state #state_tokens,
-            }
+    let visitor_struct = quote! {
+        struct __Visitor<'state, __State: ?Sized> {
+            state: &'state __State,
         }
     };
 
-    let visitor_impl = if uses_generic_state {
-        quote! {
-            impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> {
-                type Value = #ident;
+    let visitor_where_clause = quote_where_clause(where_clause);
+    let visitor_impl = quote! {
+        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> #visitor_where_clause {
+            type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("struct ")?;
-                    formatter.write_str(stringify!(#ident))
-                }
-
-                fn visit_map<__M>(self, mut __map: __M) -> ::core::result::Result<Self::Value, __M::Error>
-                where
-                    __M: _serde::de::MapAccess<'de>,
-                {
-                    let state = self.state;
-                    #(#init_locals)*
-                    while let ::core::option::Option::Some(key) =
-                        _serde::de::MapAccess::next_key::<__Field>(&mut __map)?
-                    {
-                        match key {
-                            #(#match_arms)*
-                            __Field::__Ignore => {
-                                let _ = _serde::de::MapAccess::next_value::<_serde::de::IgnoredAny>(&mut __map)?;
-                            }
-                        }
-                    }
-                    #(#build_fields)*
-                    ::core::result::Result::Ok(#construct)
-                }
+            fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str("struct ")?;
+                formatter.write_str(stringify!(#ident))
             }
-        }
-    } else {
-        quote! {
-            impl<'de, 'state> _serde::de::Visitor<'de> for __Visitor<'state> {
-                type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("struct ")?;
-                    formatter.write_str(stringify!(#ident))
-                }
-
-                fn visit_map<__M>(self, mut __map: __M) -> ::core::result::Result<Self::Value, __M::Error>
-                where
-                    __M: _serde::de::MapAccess<'de>,
+            fn visit_map<__M>(self, mut __map: __M) -> ::core::result::Result<Self::Value, __M::Error>
+            where
+                __M: _serde::de::MapAccess<'de>,
+            {
+                let state = self.state;
+                #(#init_locals)*
+                while let ::core::option::Option::Some(key) =
+                    _serde::de::MapAccess::next_key::<__Field>(&mut __map)?
                 {
-                    let state = self.state;
-                    #(#init_locals)*
-                    while let ::core::option::Option::Some(key) =
-                        _serde::de::MapAccess::next_key::<__Field>(&mut __map)?
-                    {
-                        match key {
-                            #(#match_arms)*
-                            __Field::__Ignore => {
-                                let _ = _serde::de::MapAccess::next_value::<_serde::de::IgnoredAny>(&mut __map)?;
-                            }
+                    match key {
+                        #(#match_arms)*
+                        __Field::__Ignore => {
+                            let _ = _serde::de::MapAccess::next_value::<_serde::de::IgnoredAny>(&mut __map)?;
                         }
                     }
-                    #(#build_fields)*
-                    ::core::result::Result::Ok(#construct)
                 }
+                #(#build_fields)*
+                ::core::result::Result::Ok(#construct)
             }
         }
     };
@@ -415,15 +319,15 @@ fn deserialize_unnamed_struct(
     ident: &syn::Ident,
     fields: &FieldsUnnamed,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     match fields.unnamed.len() {
         0 => deserialize_unit_struct(ident),
         1 => {
             let ty = &fields.unnamed.first().unwrap().ty;
-            deserialize_newtype_struct(ident, ty, state_tokens, uses_generic_state)
+            deserialize_newtype_struct(ident, ty, state_tokens, where_clause)
         }
-        _ => deserialize_tuple_struct(ident, fields, state_tokens, uses_generic_state),
+        _ => deserialize_tuple_struct(ident, fields, state_tokens, where_clause),
     }
 }
 
@@ -431,19 +335,11 @@ fn deserialize_newtype_struct(
     ident: &syn::Ident,
     field_ty: &syn::Type,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
-    let visitor_struct = if uses_generic_state {
-        quote! {
-            struct __Visitor<'state, __State: ?Sized> {
-                state: &'state __State,
-            }
-        }
-    } else {
-        quote! {
-            struct __Visitor<'state> {
-                state: &'state #state_tokens,
-            }
+    let visitor_struct = quote! {
+        struct __Visitor<'state, __State: ?Sized> {
+            state: &'state __State,
         }
     };
 
@@ -482,31 +378,17 @@ fn deserialize_newtype_struct(
         }
     };
 
-    let visitor_impl = if uses_generic_state {
-        quote! {
-            impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> {
-                type Value = #ident;
+    let visitor_where_clause = quote_where_clause(where_clause);
+    let visitor_impl = quote! {
+        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> #visitor_where_clause {
+            type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("newtype struct ")?;
-                    formatter.write_str(stringify!(#ident))
-                }
-
-                #visit_body
+            fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str("newtype struct ")?;
+                formatter.write_str(stringify!(#ident))
             }
-        }
-    } else {
-        quote! {
-            impl<'de, 'state> _serde::de::Visitor<'de> for __Visitor<'state> {
-                type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("newtype struct ")?;
-                    formatter.write_str(stringify!(#ident))
-                }
-
-                #visit_body
-            }
+            #visit_body
         }
     };
 
@@ -526,7 +408,7 @@ fn deserialize_tuple_struct(
     ident: &syn::Ident,
     fields: &FieldsUnnamed,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let len = fields.unnamed.len();
     let bindings: Vec<_> = (0..len).map(|i| format_ident!("__field_{}", i)).collect();
@@ -548,17 +430,9 @@ fn deserialize_tuple_struct(
 
     let construct = quote!(#ident(#(#bindings),*));
 
-    let visitor_struct = if uses_generic_state {
-        quote! {
-            struct __Visitor<'state, __State: ?Sized> {
-                state: &'state __State,
-            }
-        }
-    } else {
-        quote! {
-            struct __Visitor<'state> {
-                state: &'state #state_tokens,
-            }
+    let visitor_struct = quote! {
+        struct __Visitor<'state, __State: ?Sized> {
+            state: &'state __State,
         }
     };
 
@@ -576,31 +450,17 @@ fn deserialize_tuple_struct(
         }
     };
 
-    let visitor_impl = if uses_generic_state {
-        quote! {
-            impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> {
-                type Value = #ident;
+    let visitor_where_clause = quote_where_clause(where_clause);
+    let visitor_impl = quote! {
+        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> #visitor_where_clause {
+            type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("tuple struct ")?;
-                    formatter.write_str(stringify!(#ident))
-                }
-
-                #visit_body
+            fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str("tuple struct ")?;
+                formatter.write_str(stringify!(#ident))
             }
-        }
-    } else {
-        quote! {
-            impl<'de, 'state> _serde::de::Visitor<'de> for __Visitor<'state> {
-                type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("tuple struct ")?;
-                    formatter.write_str(stringify!(#ident))
-                }
-
-                #visit_body
-            }
+            #visit_body
         }
     };
 
@@ -648,7 +508,7 @@ fn deserialize_enum_body(
     ident: &syn::Ident,
     data: &DataEnum,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let variant_names: Vec<_> = data
         .variants
@@ -716,71 +576,38 @@ fn deserialize_enum_body(
             ident,
             variant,
             state_tokens,
-            uses_generic_state,
             index,
             &mut helper_tokens,
+            where_clause,
         )
     });
 
-    let visitor_struct = if uses_generic_state {
-        quote! {
-            struct __Visitor<'state, __State: ?Sized> {
-                state: &'state __State,
-            }
-        }
-    } else {
-        quote! {
-            struct __Visitor<'state> {
-                state: &'state #state_tokens,
-            }
+    let visitor_struct = quote! {
+        struct __Visitor<'state, __State: ?Sized> {
+            state: &'state __State,
         }
     };
 
-    let visitor_impl = if uses_generic_state {
-        quote! {
-            impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> {
-                type Value = #ident;
+    let visitor_where_clause = quote_where_clause(where_clause);
+    let visitor_impl = quote! {
+        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> #visitor_where_clause {
+            type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("enum ")?;
-                    formatter.write_str(stringify!(#ident))
-                }
-
-                fn visit_enum<__E>(
-                    self,
-                    __enum: __E,
-                ) -> ::core::result::Result<Self::Value, __E::Error>
-                where
-                    __E: _serde::de::EnumAccess<'de>,
-                {
-                    let state = self.state;
-                    match _serde::de::EnumAccess::variant::<__Variant>(__enum)? {
-                        #(#variant_match_arms)*
-                    }
-                }
+            fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str("enum ")?;
+                formatter.write_str(stringify!(#ident))
             }
-        }
-    } else {
-        quote! {
-            impl<'de, 'state> _serde::de::Visitor<'de> for __Visitor<'state> {
-                type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("enum ")?;
-                    formatter.write_str(stringify!(#ident))
-                }
-
-                fn visit_enum<__E>(
-                    self,
-                    __enum: __E,
-                ) -> ::core::result::Result<Self::Value, __E::Error>
-                where
-                    __E: _serde::de::EnumAccess<'de>,
-                {
-                    let state = self.state;
-                    match _serde::de::EnumAccess::variant::<__Variant>(__enum)? {
-                        #(#variant_match_arms)*
-                    }
+            fn visit_enum<__E>(
+                self,
+                __enum: __E,
+            ) -> ::core::result::Result<Self::Value, __E::Error>
+            where
+                __E: _serde::de::EnumAccess<'de>,
+            {
+                let state = self.state;
+                match _serde::de::EnumAccess::variant::<__Variant>(__enum)? {
+                    #(#variant_match_arms)*
                 }
             }
         }
@@ -807,9 +634,9 @@ fn deserialize_enum_variant_arm(
     ident: &syn::Ident,
     variant: &syn::Variant,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
     index: usize,
     helpers: &mut Vec<TokenStream>,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let variant_ident = &variant.ident;
     match &variant.fields {
@@ -838,8 +665,8 @@ fn deserialize_enum_variant_arm(
                 variant_ident,
                 fields,
                 state_tokens,
-                uses_generic_state,
                 &visitor_ident,
+                where_clause,
             ));
             let len = fields.unnamed.len();
             quote! {
@@ -860,9 +687,9 @@ fn deserialize_enum_variant_arm(
                 variant_ident,
                 fields,
                 state_tokens,
-                uses_generic_state,
                 &visitor_ident,
                 &field_array_ident,
+                where_clause,
             ));
             quote! {
                 (__Variant::#variant_ident, __variant) => {
@@ -882,8 +709,8 @@ fn tuple_variant_visitor(
     variant_ident: &syn::Ident,
     fields: &FieldsUnnamed,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
     visitor_ident: &syn::Ident,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let len = fields.unnamed.len();
     let bindings: Vec<_> = (0..len)
@@ -906,19 +733,10 @@ fn tuple_variant_visitor(
     });
     let construct = quote!(#ident::#variant_ident(#(#bindings),*));
 
-    let visitor_struct = if uses_generic_state {
-        quote! {
-            #[allow(non_camel_case_types)]
-            struct #visitor_ident<'state, __State: ?Sized> {
-                state: &'state __State,
-            }
-        }
-    } else {
-        quote! {
-            #[allow(non_camel_case_types)]
-            struct #visitor_ident<'state> {
-                state: &'state #state_tokens,
-            }
+    let visitor_struct = quote! {
+        #[allow(non_camel_case_types)]
+        struct #visitor_ident<'state, __State: ?Sized> {
+            state: &'state __State,
         }
     };
 
@@ -936,31 +754,17 @@ fn tuple_variant_visitor(
         }
     };
 
-    let visitor_impl = if uses_generic_state {
-        quote! {
-            impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for #visitor_ident<'state, __State> {
-                type Value = #ident;
+    let visitor_where_clause = quote_where_clause(where_clause);
+    let visitor_impl = quote! {
+        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for #visitor_ident<'state, __State> #visitor_where_clause {
+            type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("tuple variant ")?;
-                    formatter.write_str(stringify!(#ident::#variant_ident))
-                }
-
-                #visit_body
+            fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str("tuple variant ")?;
+                formatter.write_str(stringify!(#ident::#variant_ident))
             }
-        }
-    } else {
-        quote! {
-            impl<'de, 'state> _serde::de::Visitor<'de> for #visitor_ident<'state> {
-                type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("tuple variant ")?;
-                    formatter.write_str(stringify!(#ident::#variant_ident))
-                }
-
-                #visit_body
-            }
+            #visit_body
         }
     };
 
@@ -975,9 +779,9 @@ fn struct_variant_helpers(
     variant_ident: &syn::Ident,
     fields: &FieldsNamed,
     state_tokens: &TokenStream,
-    uses_generic_state: bool,
     visitor_ident: &syn::Ident,
     field_array_ident: &syn::Ident,
+    where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let field_names: Vec<String> = fields
         .named
@@ -1091,88 +895,45 @@ fn struct_variant_helpers(
         quote!(#ident::#variant_ident { #(#pairs),* })
     };
 
-    let visitor_struct = if uses_generic_state {
-        quote! {
-            #[allow(non_camel_case_types)]
-            struct #visitor_ident<'state, __State: ?Sized> {
-                state: &'state __State,
-            }
-        }
-    } else {
-        quote! {
-            #[allow(non_camel_case_types)]
-            struct #visitor_ident<'state> {
-                state: &'state #state_tokens,
-            }
+    let visitor_struct = quote! {
+        #[allow(non_camel_case_types)]
+        struct #visitor_ident<'state, __State: ?Sized> {
+            state: &'state __State,
         }
     };
 
-    let visitor_impl = if uses_generic_state {
-        quote! {
-            impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for #visitor_ident<'state, __State> {
-                type Value = #ident;
+    let visitor_where_clause = quote_where_clause(where_clause);
+    let visitor_impl = quote! {
+        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for #visitor_ident<'state, __State> #visitor_where_clause {
+            type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("struct variant ")?;
-                    formatter.write_str(stringify!(#ident::#variant_ident))
-                }
-
-                fn visit_map<__M>(
-                    self,
-                    mut __map: __M,
-                ) -> ::core::result::Result<Self::Value, __M::Error>
-                where
-                    __M: _serde::de::MapAccess<'de>,
-                {
-                    let state = self.state;
-                    #(#init_locals)*
-                    while let ::core::option::Option::Some(key) =
-                        _serde::de::MapAccess::next_key::<#field_enum_ident>(&mut __map)?
-                    {
-                        match key {
-                            #(#match_arms)*
-                            #field_enum_ident::__Ignore => {
-                                let _ = _serde::de::MapAccess::next_value::<_serde::de::IgnoredAny>(&mut __map)?;
-                            }
-                        }
-                    }
-                    #(#build_fields)*
-                    ::core::result::Result::Ok(#construct)
-                }
+            fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                formatter.write_str("struct variant ")?;
+                formatter.write_str(stringify!(#ident::#variant_ident))
             }
-        }
-    } else {
-        quote! {
-            impl<'de, 'state> _serde::de::Visitor<'de> for #visitor_ident<'state> {
-                type Value = #ident;
 
-                fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-                    formatter.write_str("struct variant ")?;
-                    formatter.write_str(stringify!(#ident::#variant_ident))
-                }
-
-                fn visit_map<__M>(
-                    self,
-                    mut __map: __M,
-                ) -> ::core::result::Result<Self::Value, __M::Error>
-                where
-                    __M: _serde::de::MapAccess<'de>,
+            fn visit_map<__M>(
+                self,
+                mut __map: __M,
+            ) -> ::core::result::Result<Self::Value, __M::Error>
+            where
+                __M: _serde::de::MapAccess<'de>,
+            {
+                let state = self.state;
+                #(#init_locals)*
+                while let ::core::option::Option::Some(key) =
+                    _serde::de::MapAccess::next_key::<#field_enum_ident>(&mut __map)?
                 {
-                    let state = self.state;
-                    #(#init_locals)*
-                    while let ::core::option::Option::Some(key) =
-                        _serde::de::MapAccess::next_key::<#field_enum_ident>(&mut __map)?
-                    {
-                        match key {
-                            #(#match_arms)*
-                            #field_enum_ident::__Ignore => {
-                                let _ = _serde::de::MapAccess::next_value::<_serde::de::IgnoredAny>(&mut __map)?;
-                            }
+                    match key {
+                        #(#match_arms)*
+                        #field_enum_ident::__Ignore => {
+                            let _ =
+                                _serde::de::MapAccess::next_value::<_serde::de::IgnoredAny>(&mut __map)?;
                         }
                     }
-                    #(#build_fields)*
-                    ::core::result::Result::Ok(#construct)
                 }
+                #(#build_fields)*
+                ::core::result::Result::Ok(#construct)
             }
         }
     };
@@ -1191,13 +952,6 @@ fn add_state_param(generics: &Generics) -> Generics {
     let lifetime: syn::LifetimeParam = parse_quote!('de);
     generics.params.insert(0, GenericParam::Lifetime(lifetime));
     generics.params.push(parse_quote!(__State: ?Sized));
-    generics
-}
-
-fn add_de_lifetime(generics: &Generics) -> Generics {
-    let mut generics = generics.clone();
-    let lifetime: syn::LifetimeParam = parse_quote!('de);
-    generics.params.insert(0, GenericParam::Lifetime(lifetime));
     generics
 }
 
@@ -1238,10 +992,16 @@ fn add_deserialize_bounds_from_types(
     }
 }
 
+fn quote_where_clause(clause: &Option<syn::WhereClause>) -> TokenStream {
+    match clause {
+        Some(clause) => quote!(#clause),
+        None => TokenStream::new(),
+    }
+}
+
 struct ContainerAttributes {
     transparent: bool,
     serde_path: Option<syn::Path>,
-    state_type: Option<syn::Type>,
 }
 
 impl ContainerAttributes {
@@ -1249,7 +1009,6 @@ impl ContainerAttributes {
         let mut result = ContainerAttributes {
             transparent: false,
             serde_path: None,
-            state_type: None,
         };
 
         for attr in attrs {
@@ -1267,9 +1026,9 @@ impl ContainerAttributes {
                     return Ok(());
                 }
                 if meta.path.is_ident("state") {
-                    let ty = meta.value()?.parse()?;
-                    result.state_type = Some(ty);
-                    return Ok(());
+                    return Err(meta.error(
+                        "`serde_state(state = ..)` is no longer supported; the derive now infers the state",
+                    ));
                 }
                 Err(meta.error("unsupported serde attribute"))
             })?;

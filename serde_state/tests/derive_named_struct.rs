@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_state::{DeserializeState, SerializeState};
 use std::{cell::Cell, marker::PhantomData};
@@ -13,28 +13,27 @@ struct Recorder {
 struct CounterValue(u32);
 
 impl SerializeState<Recorder> for CounterValue {
-    fn serialize_state<S>(&self, state: &Recorder, serializer: S) -> Result<S::Ok, S::Error>
+    fn serialize_state<S>(&self, recorder: &Recorder, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
-        state.serialized.set(state.serialized.get() + 1);
+        recorder.serialized.set(recorder.serialized.get() + 1);
         serializer.serialize_u32(self.0)
     }
 }
 
 impl<'de> DeserializeState<'de, Recorder> for CounterValue {
-    fn deserialize_state<D>(state: &Recorder, deserializer: D) -> Result<Self, D::Error>
+    fn deserialize_state<D>(recorder: &Recorder, deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        state.deserialized.set(state.deserialized.get() + 1);
+        recorder.deserialized.set(recorder.deserialized.get() + 1);
         let value = u32::deserialize(deserializer)?;
         Ok(CounterValue(value))
     }
 }
 
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
-#[serde_state(state = Recorder)]
 struct Example {
     first: CounterValue,
     second: CounterValue,
@@ -42,25 +41,22 @@ struct Example {
 
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 #[serde(transparent)]
-#[serde_state(state = Recorder)]
 struct Wrapper {
     inner: CounterValue,
 }
 
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
-#[serde_state(state = Recorder)]
 struct Pair(CounterValue, CounterValue);
 
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 struct Empty;
 
-#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct PlainNumbers {
     value: u32,
 }
 
 #[derive(Clone, SerializeState, DeserializeState, Debug, PartialEq)]
-#[serde_state(state = Recorder)]
 enum Action {
     Idle,
     Reset(CounterValue),
@@ -71,17 +67,9 @@ enum Action {
     },
 }
 
-#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq, DeserializeState, SerializeState)]
 struct PhantomWrapper {
     marker: PhantomData<NeedsNoBounds>,
-}
-
-impl Default for PhantomWrapper {
-    fn default() -> Self {
-        Self {
-            marker: PhantomData,
-        }
-    }
 }
 
 struct NeedsNoBounds;

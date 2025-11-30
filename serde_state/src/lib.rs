@@ -1,4 +1,5 @@
 pub use serde_state_derive::{DeserializeState, SerializeState};
+use std::boxed::Box;
 
 pub trait SerializeState<State: ?Sized> {
     fn serialize_state<S>(&self, state: &State, serializer: S) -> Result<S::Ok, S::Error>
@@ -27,6 +28,27 @@ impl<'de, T: serde::Deserialize<'de>, State: ?Sized> DeserializeState<'de, State
         D: serde::Deserializer<'de>,
     {
         T::deserialize(deserializer)
+    }
+}
+
+impl<State: ?Sized, T: SerializeState<State> + ?Sized> SerializeState<State> for Box<T> {
+    fn serialize_state<S>(&self, state: &State, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        T::serialize_state(&**self, state, serializer)
+    }
+}
+
+impl<'de, State: ?Sized, T> DeserializeState<'de, State> for Box<T>
+where
+    T: DeserializeState<'de, State>,
+{
+    fn deserialize_state<D>(state: &State, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        T::deserialize_state(state, deserializer).map(Box::new)
     }
 }
 

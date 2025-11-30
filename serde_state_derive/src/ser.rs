@@ -28,30 +28,15 @@ fn derive_struct(
     data: &DataStruct,
     attrs: &ContainerAttributes,
 ) -> syn::Result<TokenStream> {
-    let (impl_generics, ty_generics, where_clause, state_tokens) = match &attrs.state_type {
-        Some(state_ty) => {
-            let (impl_generics_ref, ty_generics_ref, _) = input.generics.split_for_impl();
-            let impl_generics = quote!(#impl_generics_ref);
-            let ty_generics = quote!(#ty_generics_ref);
-            let mut where_clause = input.generics.where_clause.clone();
-            let state_tokens = quote!(#state_ty);
-            let field_types = collect_field_types_from_fields(&data.fields);
-            add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
-            (impl_generics, ty_generics, where_clause, state_tokens)
-        }
-        None => {
-            let impl_generics_storage = add_state_param(&input.generics);
-            let (impl_generics_ref, _, _) = impl_generics_storage.split_for_impl();
-            let impl_generics = quote!(#impl_generics_ref);
-            let (_, ty_generics_ref, _) = input.generics.split_for_impl();
-            let ty_generics = quote!(#ty_generics_ref);
-            let mut where_clause = input.generics.where_clause.clone();
-            let state_tokens = quote!(__State);
-            let field_types = collect_field_types_from_fields(&data.fields);
-            add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
-            (impl_generics, ty_generics, where_clause, state_tokens)
-        }
-    };
+    let impl_generics_storage = add_state_param(&input.generics);
+    let (impl_generics_ref, _, _) = impl_generics_storage.split_for_impl();
+    let impl_generics = quote!(#impl_generics_ref);
+    let (_, ty_generics_ref, _) = input.generics.split_for_impl();
+    let ty_generics = quote!(#ty_generics_ref);
+    let mut where_clause = input.generics.where_clause.clone();
+    let state_tokens = quote!(__State);
+    let field_types = collect_field_types_from_fields(&data.fields);
+    add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     let where_clause_tokens = match &where_clause {
         Some(clause) => quote!(#clause),
         None => TokenStream::new(),
@@ -84,32 +69,17 @@ fn derive_struct(
 fn derive_enum(
     input: &DeriveInput,
     data: &DataEnum,
-    attrs: &ContainerAttributes,
+    _attrs: &ContainerAttributes,
 ) -> syn::Result<TokenStream> {
-    let (impl_generics, ty_generics, where_clause, state_tokens) = match &attrs.state_type {
-        Some(state_ty) => {
-            let (impl_generics_ref, ty_generics_ref, _) = input.generics.split_for_impl();
-            let impl_generics = quote!(#impl_generics_ref);
-            let ty_generics = quote!(#ty_generics_ref);
-            let mut where_clause = input.generics.where_clause.clone();
-            let state_tokens = quote!(#state_ty);
-            let field_types = collect_field_types_from_enum(data);
-            add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
-            (impl_generics, ty_generics, where_clause, state_tokens)
-        }
-        None => {
-            let impl_generics_storage = add_state_param(&input.generics);
-            let (impl_generics_ref, _, _) = impl_generics_storage.split_for_impl();
-            let impl_generics = quote!(#impl_generics_ref);
-            let (_, ty_generics_ref, _) = input.generics.split_for_impl();
-            let ty_generics = quote!(#ty_generics_ref);
-            let mut where_clause = input.generics.where_clause.clone();
-            let state_tokens = quote!(__State);
-            let field_types = collect_field_types_from_enum(data);
-            add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
-            (impl_generics, ty_generics, where_clause, state_tokens)
-        }
-    };
+    let impl_generics_storage = add_state_param(&input.generics);
+    let (impl_generics_ref, _, _) = impl_generics_storage.split_for_impl();
+    let impl_generics = quote!(#impl_generics_ref);
+    let (_, ty_generics_ref, _) = input.generics.split_for_impl();
+    let ty_generics = quote!(#ty_generics_ref);
+    let mut where_clause = input.generics.where_clause.clone();
+    let state_tokens = quote!(__State);
+    let field_types = collect_field_types_from_enum(data);
+    add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     let where_clause_tokens = match &where_clause {
         Some(clause) => quote!(#clause),
         None => TokenStream::new(),
@@ -384,7 +354,6 @@ fn add_state_param(generics: &Generics) -> Generics {
 struct ContainerAttributes {
     transparent: bool,
     serde_path: Option<syn::Path>,
-    state_type: Option<syn::Type>,
 }
 
 impl ContainerAttributes {
@@ -392,7 +361,6 @@ impl ContainerAttributes {
         let mut result = ContainerAttributes {
             transparent: false,
             serde_path: None,
-            state_type: None,
         };
 
         for attr in attrs {
@@ -410,9 +378,9 @@ impl ContainerAttributes {
                     return Ok(());
                 }
                 if meta.path.is_ident("state") {
-                    let ty = meta.value()?.parse()?;
-                    result.state_type = Some(ty);
-                    return Ok(());
+                    return Err(meta.error(
+                        "`serde_state(state = ..)` is no longer supported; the derive now infers the state",
+                    ));
                 }
                 Err(meta.error("unsupported serde attribute"))
             })?;
