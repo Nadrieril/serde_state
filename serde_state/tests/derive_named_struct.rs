@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 use serde_state::{DeserializeState, SerializeState};
 use std::{cell::Cell, marker::PhantomData};
@@ -51,7 +51,7 @@ struct Pair(CounterValue, CounterValue);
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 struct Empty;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 struct PlainNumbers {
     value: u32,
 }
@@ -67,7 +67,7 @@ enum Action {
     },
 }
 
-#[derive(Debug, Default, PartialEq, DeserializeState, SerializeState)]
+#[derive(SerializeState, DeserializeState, Debug, Default, PartialEq)]
 struct PhantomWrapper {
     marker: PhantomData<NeedsNoBounds>,
 }

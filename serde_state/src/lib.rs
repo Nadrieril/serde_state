@@ -1,5 +1,6 @@
 pub use serde_state_derive::{DeserializeState, SerializeState};
 use std::boxed::Box;
+use std::marker::PhantomData;
 
 pub trait SerializeState<State: ?Sized> {
     fn serialize_state<S>(&self, state: &State, serializer: S) -> Result<S::Ok, S::Error>
@@ -11,24 +12,6 @@ pub trait DeserializeState<'de, State: ?Sized>: Sized {
     fn deserialize_state<D>(state: &State, deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>;
-}
-
-// Blanket impls for normal serde types.
-impl<T: serde::Serialize, State: ?Sized> SerializeState<State> for T {
-    fn serialize_state<S>(&self, _state: &State, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        self.serialize(serializer)
-    }
-}
-impl<'de, T: serde::Deserialize<'de>, State: ?Sized> DeserializeState<'de, State> for T {
-    fn deserialize_state<D>(_state: &State, deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        T::deserialize(deserializer)
-    }
 }
 
 impl<State: ?Sized, T: SerializeState<State> + ?Sized> SerializeState<State> for Box<T> {
@@ -49,6 +32,45 @@ where
         D: serde::Deserializer<'de>,
     {
         T::deserialize_state(state, deserializer).map(Box::new)
+    }
+}
+
+impl<State: ?Sized> SerializeState<State> for u32 {
+    fn serialize_state<S>(&self, _state: &State, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(*self)
+    }
+}
+
+impl<'de, State: ?Sized> DeserializeState<'de, State> for u32 {
+    fn deserialize_state<D>(_state: &State, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::Deserialize;
+        u32::deserialize(deserializer)
+    }
+}
+
+impl<State: ?Sized, T> SerializeState<State> for PhantomData<T> {
+    fn serialize_state<S>(&self, _state: &State, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_unit_struct("PhantomData")
+    }
+}
+
+impl<'de, State: ?Sized, T> DeserializeState<'de, State> for PhantomData<T> {
+    fn deserialize_state<D>(_state: &State, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::Deserialize;
+        let _ = <serde::de::IgnoredAny>::deserialize(deserializer)?;
+        Ok(PhantomData)
     }
 }
 
