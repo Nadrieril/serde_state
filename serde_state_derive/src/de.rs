@@ -1,71 +1,69 @@
 use crate::{
-    attrs::parse_field_attrs,
+    attrs::ItemMode,
     dummy,
-    mode::{attrs_mode, merge_modes, ItemMode},
+    type_decl::{
+        EnumDecl, FieldDecl, FieldsDecl, FieldsStyle, StructDecl, TypeData, TypeDecl, VariantDecl,
+    },
 };
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
-use syn::{
-    parse_quote, Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed,
-    FieldsUnnamed, GenericParam, Generics, Type,
-};
+use syn::{parse_quote, Data, DeriveInput, GenericParam, Generics, Type};
 
 pub fn expand_derive_deserialize(input: &DeriveInput) -> syn::Result<TokenStream> {
-    let attrs = ContainerAttributes::from_attrs(&input.attrs)?;
-    let impl_block = match &input.data {
-        Data::Struct(data) => derive_struct(input, data, &attrs)?,
-        Data::Enum(data) => derive_enum(input, data, &attrs)?,
-        Data::Union(u) => {
-            return Err(syn::Error::new(
-                u.union_token.span(),
-                "DeserializeState does not support unions",
-            ));
-        }
+    if let Data::Union(u) = &input.data {
+        return Err(syn::Error::new(
+            u.union_token.span(),
+            "DeserializeState does not support unions",
+        ));
+    }
+
+    let decl = TypeDecl::from_derive_input(input)?;
+    let impl_block = match &decl.data {
+        TypeData::Struct(data) => derive_struct(&decl, data)?,
+        TypeData::Enum(data) => derive_enum(&decl, data)?,
     };
 
-    Ok(dummy::wrap_in_const(attrs.serde_path.as_ref(), impl_block))
+    Ok(dummy::wrap_in_const(
+        decl.attrs.serde_path.as_ref(),
+        impl_block,
+    ))
 }
 
-fn derive_struct(
-    input: &DeriveInput,
-    data: &DataStruct,
-    attrs: &ContainerAttributes,
-) -> syn::Result<TokenStream> {
-    let infer_state = attrs.state.is_none();
-    let impl_generics_with_state = add_state_param(&input.generics, infer_state);
+fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream> {
+    let infer_state = decl.attrs.state.is_none();
+    let impl_generics_with_state = add_state_param(decl.generics, infer_state);
     let (impl_generics_ref, _, _) = impl_generics_with_state.split_for_impl();
     let impl_generics = quote!(#impl_generics_ref);
-    let (_, ty_generics_ref, _) = input.generics.split_for_impl();
+    let (_, ty_generics_ref, _) = decl.generics.split_for_impl();
     let ty_generics = quote!(#ty_generics_ref);
-    let mut where_clause = input.generics.where_clause.clone();
-    let state_tokens = state_type_tokens(attrs.state.as_ref());
-    let field_types = collect_field_types_from_fields(&data.fields, attrs.mode);
+    let mut where_clause = decl.generics.where_clause.clone();
+    let state_tokens = state_type_tokens(decl.attrs.state.as_ref());
+    let field_types = collect_field_types_from_fields(&data.fields);
     if infer_state {
         add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     } else {
         add_deserialize_bounds_from_type_params(
             &mut where_clause,
-            &input.generics,
+            decl.generics,
             &state_tokens,
-            attrs.mode,
+            decl.attrs.mode,
         );
     }
     add_default_bounds_for_skipped(&data.fields, &mut where_clause);
     let where_clause_tokens = quote_where_clause(&where_clause);
-    let ident = &input.ident;
+    let ident = decl.ident;
 
-    let body = if attrs.transparent {
-        deserialize_transparent(ident, &data.fields, &state_tokens, attrs.mode)?
+    let body = if decl.attrs.transparent {
+        deserialize_transparent(ident, &data.fields, &state_tokens)?
     } else {
         deserialize_struct_body(
             ident,
             &data.fields,
             &state_tokens,
-            &input.generics,
+            decl.generics,
             infer_state,
             &where_clause,
-            attrs.mode,
         )
     };
 
@@ -85,44 +83,39 @@ fn derive_struct(
     })
 }
 
-fn derive_enum(
-    input: &DeriveInput,
-    data: &DataEnum,
-    attrs: &ContainerAttributes,
-) -> syn::Result<TokenStream> {
-    let infer_state = attrs.state.is_none();
-    let impl_generics_with_state = add_state_param(&input.generics, infer_state);
+fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
+    let infer_state = decl.attrs.state.is_none();
+    let impl_generics_with_state = add_state_param(decl.generics, infer_state);
     let (impl_generics_ref, _, _) = impl_generics_with_state.split_for_impl();
     let impl_generics = quote!(#impl_generics_ref);
-    let (_, ty_generics_ref, _) = input.generics.split_for_impl();
+    let (_, ty_generics_ref, _) = decl.generics.split_for_impl();
     let ty_generics = quote!(#ty_generics_ref);
-    let mut where_clause = input.generics.where_clause.clone();
-    let state_tokens = state_type_tokens(attrs.state.as_ref());
-    let field_types = collect_field_types_from_enum(data, attrs.mode);
+    let mut where_clause = decl.generics.where_clause.clone();
+    let state_tokens = state_type_tokens(decl.attrs.state.as_ref());
+    let field_types = collect_field_types_from_enum(data);
     if infer_state {
         add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     } else {
         add_deserialize_bounds_from_type_params(
             &mut where_clause,
-            &input.generics,
+            decl.generics,
             &state_tokens,
-            attrs.mode,
+            decl.attrs.mode,
         );
     }
     for variant in &data.variants {
         add_default_bounds_for_skipped(&variant.fields, &mut where_clause);
     }
     let where_clause_tokens = quote_where_clause(&where_clause);
-    let ident = &input.ident;
+    let ident = decl.ident;
 
     let body = deserialize_enum_body(
         ident,
         data,
         &state_tokens,
-        &input.generics,
+        decl.generics,
         infer_state,
         &where_clause,
-        attrs.mode,
     );
 
     Ok(quote! {
@@ -143,16 +136,15 @@ fn derive_enum(
 
 fn deserialize_transparent(
     ident: &syn::Ident,
-    fields: &Fields,
+    fields: &FieldsDecl<'_>,
     state_tokens: &TokenStream,
-    mode: ItemMode,
 ) -> syn::Result<TokenStream> {
-    match fields {
-        Fields::Named(named) if named.named.len() == 1 => {
-            let field = named.named.first().unwrap();
-            let field_ident = field.ident.as_ref().unwrap();
-            let ty = &field.ty;
-            Ok(match merge_modes(mode, attrs_mode(&field.attrs)) {
+    match fields.style {
+        FieldsStyle::Named if fields.fields.len() == 1 => {
+            let field = &fields.fields[0];
+            let field_ident = field.ident().unwrap();
+            let ty = field.ty();
+            Ok(match field.mode() {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
                     let #field_ident = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
@@ -164,10 +156,10 @@ fn deserialize_transparent(
                 },
             })
         }
-        Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
-            let field = unnamed.unnamed.first().unwrap();
-            let ty = &field.ty;
-            Ok(match merge_modes(mode, attrs_mode(&field.attrs)) {
+        FieldsStyle::Unnamed if fields.fields.len() == 1 => {
+            let field = &fields.fields[0];
+            let ty = field.ty();
+            Ok(match field.mode() {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
                     let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
@@ -179,8 +171,8 @@ fn deserialize_transparent(
                 },
             })
         }
-        other => Err(syn::Error::new(
-            other.span(),
+        _ => Err(syn::Error::new(
+            fields.span,
             "transparent structs must have exactly one field",
         )),
     }
@@ -188,64 +180,52 @@ fn deserialize_transparent(
 
 fn deserialize_struct_body(
     ident: &syn::Ident,
-    fields: &Fields,
+    fields: &FieldsDecl<'_>,
     state_tokens: &TokenStream,
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
-    mode: ItemMode,
 ) -> TokenStream {
-    match fields {
-        Fields::Named(named) => deserialize_named_struct(
+    match fields.style {
+        FieldsStyle::Named => deserialize_named_struct(
             ident,
-            named,
+            &fields.fields,
             state_tokens,
             generics,
             infer_state,
             where_clause,
-            mode,
         ),
-        Fields::Unnamed(unnamed) => deserialize_unnamed_struct(
+        FieldsStyle::Unnamed => deserialize_unnamed_struct(
             ident,
-            unnamed,
+            &fields.fields,
             state_tokens,
             generics,
             infer_state,
             where_clause,
-            mode,
         ),
-        Fields::Unit => deserialize_unit_struct(ident),
+        FieldsStyle::Unit => deserialize_unit_struct(ident),
     }
 }
 
 fn deserialize_named_struct(
     ident: &syn::Ident,
-    fields: &FieldsNamed,
+    fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
-    mode: ItemMode,
 ) -> TokenStream {
-    let field_infos: Vec<_> = fields
-        .named
-        .iter()
-        .map(|field| (field, parse_field_attrs(&field.attrs)))
-        .collect();
-    let included: Vec<_> = field_infos
-        .iter()
-        .filter(|(_, attrs)| !attrs.skip)
-        .collect();
+    let included: Vec<_> = fields.iter().filter(|field| !field.attrs.skip).collect();
 
     let field_names: Vec<String> = included
         .iter()
-        .map(|(field, attrs)| attrs.key(field.ident.as_ref().unwrap()))
+        .map(|field| field.attrs.key(field.ident().unwrap()))
         .collect();
 
     let field_variants: Vec<_> = included
         .iter()
-        .map(|(field, _)| {
-            let name = field.ident.as_ref().unwrap().to_string();
+        .map(|field| {
+            let name = field.ident().unwrap().to_string();
             format_ident!("__field_{}", name)
         })
         .collect();
@@ -303,9 +283,9 @@ fn deserialize_named_struct(
         }
     };
 
-    let init_locals = field_infos.iter().map(|(field, attrs)| {
-        let ident = field.ident.as_ref().unwrap();
-        if attrs.skip {
+    let init_locals = fields.iter().map(|field| {
+        let ident = field.ident().unwrap();
+        if field.attrs.skip {
             quote!()
         } else {
             quote!(let mut #ident = ::core::option::Option::None;)
@@ -315,11 +295,11 @@ fn deserialize_named_struct(
     let match_arms = included
         .iter()
         .zip(field_variants.iter())
-        .map(|((field, attrs), variant)| {
-            let ident = field.ident.as_ref().unwrap();
-            let name = attrs.key(ident);
-            let ty = &field.ty;
-            let assignment = match merge_modes(mode, attrs_mode(&field.attrs)) {
+        .map(|(field, variant)| {
+            let ident = field.ident().unwrap();
+            let name = field.attrs.key(ident);
+            let ty = field.ty();
+            let assignment = match field.mode() {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
                     #ident = ::core::option::Option::Some(
@@ -342,14 +322,14 @@ fn deserialize_named_struct(
             }
         });
 
-    let build_fields = field_infos.iter().map(|(field, attrs)| {
-        let ident = field.ident.as_ref().unwrap();
-        if attrs.skip {
+    let build_fields = fields.iter().map(|field| {
+        let ident = field.ident().unwrap();
+        if field.attrs.skip {
             quote! {
                 let #ident = ::core::default::Default::default();
             }
         } else {
-            let name = attrs.key(ident);
+            let name = field.attrs.key(ident);
             quote! {
                 let #ident = match #ident {
                     ::core::option::Option::Some(value) => value,
@@ -361,8 +341,8 @@ fn deserialize_named_struct(
     });
 
     let construct = {
-        let pairs = field_infos.iter().map(|(field, _)| {
-            let ident = field.ident.as_ref().unwrap();
+        let pairs = fields.iter().map(|field| {
+            let ident = field.ident().unwrap();
             quote!(#ident: #ident)
         });
         quote!(#ident { #(#pairs),* })
@@ -436,17 +416,16 @@ fn deserialize_named_struct(
 
 fn deserialize_unnamed_struct(
     ident: &syn::Ident,
-    fields: &FieldsUnnamed,
+    fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
-    mode: ItemMode,
 ) -> TokenStream {
-    match fields.unnamed.len() {
+    match fields.len() {
         0 => deserialize_unit_struct(ident),
         1 => {
-            let field = fields.unnamed.first().unwrap();
+            let field = &fields[0];
             deserialize_newtype_struct(
                 ident,
                 field,
@@ -454,7 +433,6 @@ fn deserialize_unnamed_struct(
                 generics,
                 infer_state,
                 where_clause,
-                mode,
             )
         }
         _ => deserialize_tuple_struct(
@@ -464,27 +442,25 @@ fn deserialize_unnamed_struct(
             generics,
             infer_state,
             where_clause,
-            mode,
         ),
     }
 }
 
 fn deserialize_newtype_struct(
     ident: &syn::Ident,
-    field: &syn::Field,
+    field: &FieldDecl<'_>,
     state_tokens: &TokenStream,
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
-    mode: ItemMode,
 ) -> TokenStream {
-    let field_ty = &field.ty;
+    let field_ty = field.ty();
     let (visitor_struct_generics, _) = visitor_struct_generics_tokens(generics, infer_state);
     let (visitor_impl_generics, visitor_impl_type_generics) =
         visitor_impl_generics_tokens(generics, infer_state);
     let (_, ty_generics, _) = generics.split_for_impl();
     let phantom_type = phantom_type(ident, generics);
-    let field_mode = merge_modes(mode, attrs_mode(&field.attrs));
+    let field_mode = field.mode();
 
     let newtype_body = match field_mode {
         ItemMode::Stateful => quote! {
@@ -586,20 +562,19 @@ fn deserialize_newtype_struct(
 
 fn deserialize_tuple_struct(
     ident: &syn::Ident,
-    fields: &FieldsUnnamed,
+    fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
-    mode: ItemMode,
 ) -> TokenStream {
-    let len = fields.unnamed.len();
+    let len = fields.len();
     let bindings: Vec<_> = (0..len).map(|i| format_ident!("__field_{}", i)).collect();
-    let read_fields = fields.unnamed.iter().enumerate().map(|(index, field)| {
+    let read_fields = fields.iter().enumerate().map(|(index, field)| {
         let binding = &bindings[index];
-        let ty = &field.ty;
+        let ty = field.ty();
         let idx = index;
-        match merge_modes(mode, attrs_mode(&field.attrs)) {
+        match field.mode() {
             ItemMode::Stateful => quote! {
                 let #binding = match _serde::de::SeqAccess::next_element_seed(
                     &mut __seq,
@@ -707,19 +682,18 @@ fn deserialize_unit_struct(ident: &syn::Ident) -> TokenStream {
 
 fn deserialize_enum_body(
     ident: &syn::Ident,
-    data: &DataEnum,
+    data: &EnumDecl<'_>,
     state_tokens: &TokenStream,
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
-    mode: ItemMode,
 ) -> TokenStream {
     let variant_names: Vec<_> = data
         .variants
         .iter()
         .map(|variant| variant.ident.to_string())
         .collect();
-    let variant_idents: Vec<_> = data.variants.iter().map(|variant| &variant.ident).collect();
+    let variant_idents: Vec<_> = data.variants.iter().map(|variant| variant.ident).collect();
 
     let const_variants = {
         let names = variant_names.iter();
@@ -781,7 +755,6 @@ fn deserialize_enum_body(
             variant,
             state_tokens,
             generics,
-            mode,
             infer_state,
             index,
             &mut helper_tokens,
@@ -849,19 +822,17 @@ fn deserialize_enum_body(
 
 fn deserialize_enum_variant_arm(
     ident: &syn::Ident,
-    variant: &syn::Variant,
+    variant: &VariantDecl<'_>,
     state_tokens: &TokenStream,
     generics: &Generics,
-    mode: ItemMode,
     infer_state: bool,
     index: usize,
     helpers: &mut Vec<TokenStream>,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
-    let variant_ident = &variant.ident;
-    let variant_mode = merge_modes(mode, attrs_mode(&variant.attrs));
-    match &variant.fields {
-        Fields::Unit => {
+    let variant_ident = variant.ident;
+    match variant.fields.style {
+        FieldsStyle::Unit => {
             quote! {
                 (__Variant::#variant_ident, __variant) => {
                     _serde::de::VariantAccess::unit_variant(__variant)?;
@@ -869,11 +840,10 @@ fn deserialize_enum_variant_arm(
                 }
             }
         }
-        Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-            let field = fields.unnamed.first().unwrap();
-            let ty = &field.ty;
-            let field_mode = merge_modes(variant_mode, attrs_mode(&field.attrs));
-            match field_mode {
+        FieldsStyle::Unnamed if variant.fields.fields.len() == 1 => {
+            let field = &variant.fields.fields[0];
+            let ty = field.ty();
+            match field.mode() {
                 ItemMode::Stateful => quote! {
                     (__Variant::#variant_ident, __variant) => {
                         let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
@@ -889,20 +859,19 @@ fn deserialize_enum_variant_arm(
                 },
             }
         }
-        Fields::Unnamed(fields) => {
+        FieldsStyle::Unnamed => {
             let visitor_ident = format_ident!("__Variant{}_TupleVisitor", index);
             helpers.push(tuple_variant_visitor(
                 ident,
                 variant_ident,
-                fields,
+                &variant.fields.fields,
                 state_tokens,
                 generics,
-                variant_mode,
                 infer_state,
                 &visitor_ident,
                 where_clause,
             ));
-            let len = fields.unnamed.len();
+            let len = variant.fields.fields.len();
             quote! {
                 (__Variant::#variant_ident, __variant) => {
                     _serde::de::VariantAccess::tuple_variant(
@@ -916,16 +885,15 @@ fn deserialize_enum_variant_arm(
                 }
             }
         }
-        Fields::Named(fields) => {
+        FieldsStyle::Named => {
             let visitor_ident = format_ident!("__Variant{}_StructVisitor", index);
             let field_array_ident = format_ident!("__VARIANT_FIELDS_{}", index);
             helpers.push(struct_variant_helpers(
                 ident,
                 variant_ident,
-                fields,
+                &variant.fields.fields,
                 state_tokens,
                 generics,
-                variant_mode,
                 infer_state,
                 &visitor_ident,
                 &field_array_ident,
@@ -950,23 +918,22 @@ fn deserialize_enum_variant_arm(
 fn tuple_variant_visitor(
     ident: &syn::Ident,
     variant_ident: &syn::Ident,
-    fields: &FieldsUnnamed,
+    fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
     generics: &Generics,
-    mode: ItemMode,
     infer_state: bool,
     visitor_ident: &syn::Ident,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
-    let len = fields.unnamed.len();
+    let len = fields.len();
     let bindings: Vec<_> = (0..len)
         .map(|i| format_ident!("__variant_field_{}", i))
         .collect();
-    let read_fields = fields.unnamed.iter().enumerate().map(|(index, field)| {
+    let read_fields = fields.iter().enumerate().map(|(index, field)| {
         let binding = &bindings[index];
-        let ty = &field.ty;
+        let ty = field.ty();
         let idx = index;
-        match merge_modes(mode, attrs_mode(&field.attrs)) {
+        match field.mode() {
             ItemMode::Stateful => quote! {
                 let #binding = match _serde::de::SeqAccess::next_element_seed(
                     &mut __seq,
@@ -1039,37 +1006,24 @@ fn tuple_variant_visitor(
 fn struct_variant_helpers(
     ident: &syn::Ident,
     variant_ident: &syn::Ident,
-    fields: &FieldsNamed,
+    fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
     generics: &Generics,
-    mode: ItemMode,
     infer_state: bool,
     visitor_ident: &syn::Ident,
     field_array_ident: &syn::Ident,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
-    let field_infos: Vec<_> = fields
-        .named
-        .iter()
-        .map(|field| (field, parse_field_attrs(&field.attrs)))
-        .collect();
-    let included: Vec<_> = field_infos
-        .iter()
-        .filter(|(_, attrs)| !attrs.skip)
-        .collect();
-    let field_idents: Vec<_> = fields
-        .named
-        .iter()
-        .map(|field| field.ident.as_ref().unwrap())
-        .collect();
+    let included: Vec<_> = fields.iter().filter(|field| !field.attrs.skip).collect();
+    let field_idents: Vec<_> = fields.iter().map(|field| field.ident().unwrap()).collect();
     let field_names: Vec<String> = included
         .iter()
-        .map(|(field, attrs)| attrs.key(field.ident.as_ref().unwrap()))
+        .map(|field| field.attrs.key(field.ident().unwrap()))
         .collect();
     let field_variants: Vec<_> = included
         .iter()
-        .map(|(field, _)| {
-            let name = field.ident.as_ref().unwrap().to_string();
+        .map(|field| {
+            let name = field.ident().unwrap().to_string();
             format_ident!("__variant_field_{}", name)
         })
         .collect();
@@ -1130,9 +1084,9 @@ fn struct_variant_helpers(
         }
     };
 
-    let init_locals = field_infos.iter().map(|(field, attrs)| {
-        let ident = field.ident.as_ref().unwrap();
-        if attrs.skip {
+    let init_locals = fields.iter().map(|field| {
+        let ident = field.ident().unwrap();
+        if field.attrs.skip {
             quote!()
         } else {
             quote!(let mut #ident = ::core::option::Option::None;)
@@ -1142,11 +1096,11 @@ fn struct_variant_helpers(
     let match_arms = included
         .iter()
         .zip(field_variants.iter())
-        .map(|((field, attrs), variant)| {
-            let ident = field.ident.as_ref().unwrap();
-            let ty = &field.ty;
-            let field_name = attrs.key(ident);
-            let assignment = match merge_modes(mode, attrs_mode(&field.attrs)) {
+        .map(|(field, variant)| {
+            let ident = field.ident().unwrap();
+            let ty = field.ty();
+            let field_name = field.attrs.key(ident);
+            let assignment = match field.mode() {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
                     #ident = ::core::option::Option::Some(
@@ -1169,14 +1123,14 @@ fn struct_variant_helpers(
             }
         });
 
-    let build_fields = field_infos.iter().map(|(field, attrs)| {
-        let ident = field.ident.as_ref().unwrap();
-        if attrs.skip {
+    let build_fields = fields.iter().map(|field| {
+        let ident = field.ident().unwrap();
+        if field.attrs.skip {
             quote! {
                 let #ident = ::core::default::Default::default();
             }
         } else {
-            let name = attrs.key(ident);
+            let name = field.attrs.key(ident);
             quote! {
                 let #ident = match #ident {
                     ::core::option::Option::Some(value) => value,
@@ -1272,54 +1226,23 @@ impl<'a> FieldType<'a> {
     }
 }
 
-fn collect_field_types_from_fields<'a>(
-    fields: &'a Fields,
-    default_mode: ItemMode,
-) -> Vec<FieldType<'a>> {
-    match fields {
-        Fields::Named(named) => named
-            .named
-            .iter()
-            .filter_map(|field| {
-                let attrs = parse_field_attrs(&field.attrs);
-                if attrs.skip {
-                    return None;
-                }
-                Some(FieldType::new(
-                    &field.ty,
-                    merge_modes(default_mode, attrs_mode(&field.attrs)),
-                ))
-            })
-            .collect(),
-        Fields::Unnamed(unnamed) => unnamed
-            .unnamed
-            .iter()
-            .filter_map(|field| {
-                let attrs = parse_field_attrs(&field.attrs);
-                if attrs.skip {
-                    return None;
-                }
-                Some(FieldType::new(
-                    &field.ty,
-                    merge_modes(default_mode, attrs_mode(&field.attrs)),
-                ))
-            })
-            .collect(),
-        Fields::Unit => Vec::new(),
-    }
+fn collect_field_types_from_fields<'a>(fields: &'a FieldsDecl<'a>) -> Vec<FieldType<'a>> {
+    fields
+        .fields
+        .iter()
+        .filter_map(|field| {
+            if field.attrs.skip {
+                return None;
+            }
+            Some(FieldType::new(field.ty(), field.mode()))
+        })
+        .collect()
 }
 
-fn collect_field_types_from_enum<'a>(
-    data: &'a DataEnum,
-    default_mode: ItemMode,
-) -> Vec<FieldType<'a>> {
+fn collect_field_types_from_enum<'a>(data: &'a EnumDecl<'a>) -> Vec<FieldType<'a>> {
     let mut result = Vec::new();
     for variant in &data.variants {
-        let variant_mode = merge_modes(default_mode, attrs_mode(&variant.attrs));
-        result.extend(collect_field_types_from_fields(
-            &variant.fields,
-            variant_mode,
-        ));
+        result.extend(collect_field_types_from_fields(&variant.fields));
     }
     result
 }
@@ -1435,25 +1358,14 @@ fn phantom_type(ident: &syn::Ident, generics: &Generics) -> TokenStream {
     quote!(#ident #ty_generics)
 }
 
-fn add_default_bounds_for_skipped(fields: &Fields, where_clause: &mut Option<syn::WhereClause>) {
-    match fields {
-        Fields::Named(named) => {
-            for field in &named.named {
-                let attrs = parse_field_attrs(&field.attrs);
-                if attrs.skip {
-                    push_default_bound(where_clause, &field.ty);
-                }
-            }
+fn add_default_bounds_for_skipped(
+    fields: &FieldsDecl<'_>,
+    where_clause: &mut Option<syn::WhereClause>,
+) {
+    for field in &fields.fields {
+        if field.attrs.skip {
+            push_default_bound(where_clause, field.ty());
         }
-        Fields::Unnamed(unnamed) => {
-            for field in &unnamed.unnamed {
-                let attrs = parse_field_attrs(&field.attrs);
-                if attrs.skip {
-                    push_default_bound(where_clause, &field.ty);
-                }
-            }
-        }
-        Fields::Unit => {}
     }
 }
 
@@ -1465,75 +1377,4 @@ fn push_default_bound(where_clause: &mut Option<syn::WhereClause>, ty: &Type) {
     clause
         .predicates
         .push(parse_quote!(#ty: ::core::default::Default));
-}
-
-struct ContainerAttributes {
-    transparent: bool,
-    serde_path: Option<syn::Path>,
-    state: Option<Type>,
-    mode: ItemMode,
-}
-
-impl ContainerAttributes {
-    fn from_attrs(attrs: &[Attribute]) -> syn::Result<Self> {
-        let mut result = ContainerAttributes {
-            transparent: false,
-            serde_path: None,
-            state: None,
-            mode: ItemMode::Stateful,
-        };
-
-        for attr in attrs {
-            let is_serde = attr.path().is_ident("serde");
-            let is_serde_state = attr.path().is_ident("serde_state");
-            if !(is_serde || is_serde_state) {
-                continue;
-            }
-            attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("transparent") {
-                    result.transparent = true;
-                    return Ok(());
-                }
-                if meta.path.is_ident("crate") {
-                    let path = meta.value()?.parse()?;
-                    result.serde_path = Some(path);
-                    return Ok(());
-                }
-                if meta.path.is_ident("state") {
-                    if !is_serde_state {
-                        return Err(
-                            meta.error("`state` must be specified with `serde_state(state = ..)`")
-                        );
-                    }
-                    if result.state.is_some() {
-                        return Err(meta.error("duplicate `state` attribute"));
-                    }
-                    let ty = meta.value()?.parse()?;
-                    result.state = Some(ty);
-                    return Ok(());
-                }
-                if meta.path.is_ident("stateless") {
-                    if !is_serde_state {
-                        return Err(meta.error("`stateless` must be specified with `serde_state`"));
-                    }
-                    result.mode = ItemMode::Stateless;
-                    return Ok(());
-                }
-                if meta.path.is_ident("stateful") {
-                    if !is_serde_state {
-                        return Err(meta.error("`stateful` must be specified with `serde_state`"));
-                    }
-                    result.mode = ItemMode::Stateful;
-                    return Ok(());
-                }
-                if is_serde_state {
-                    Err(meta.error("unsupported serde_state attribute"))
-                } else {
-                    Err(meta.error("unsupported serde attribute"))
-                }
-            })?;
-        }
-
-        Ok(result)
-    }
 }

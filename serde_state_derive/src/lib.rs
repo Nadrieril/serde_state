@@ -7,8 +7,8 @@ use syn::DeriveInput;
 mod attrs;
 mod de;
 mod dummy;
-mod mode;
 mod ser;
+mod type_decl;
 
 #[proc_macro_derive(SerializeState, attributes(serde, serde_state))]
 pub fn derive_serialize(input: TokenStream) -> TokenStream {
