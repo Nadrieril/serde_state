@@ -257,37 +257,18 @@ fn perfect_derive_does_not_require_generic_bounds() {
 #[test]
 fn recursive_enum_threads_state() {
     #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
-    enum CounterListNode {
+    enum CounterList {
         Nil,
-        Cons(CounterValue, Box<CounterList>),
-    }
-    #[derive(Debug, PartialEq)]
-    struct CounterList(CounterListNode);
-
-    // Manual impl to break the corecursive loop.
-    impl<State: ?Sized> serde_state::SerializeState<State> for CounterList
-    where
-        CounterValue: serde_state::SerializeState<State>,
-    {
-        fn serialize_state<S>(
-            &self,
-            state: &State,
-            serializer: S,
-        ) -> ::core::result::Result<S::Ok, S::Error>
-        where
-            S: serde::Serializer,
-        {
-            self.0.serialize_state(state, serializer)
-        }
+        Cons(CounterValue, #[serde_state(recursive)] Box<CounterList>),
     }
 
-    let list = CounterList(CounterListNode::Cons(
+    let list = CounterList::Cons(
         CounterValue(1),
-        Box::new(CounterList(CounterListNode::Cons(
+        Box::new(CounterList::Cons(
             CounterValue(2),
-            Box::new(CounterList(CounterListNode::Nil)),
-        ))),
-    ));
+            Box::new(CounterList::Nil),
+        )),
+    );
     let state = Recorder::default();
     let mut buffer = Vec::new();
     {

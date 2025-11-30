@@ -310,8 +310,18 @@ fn serialize_enum_variant(variant: &syn::Variant, index: u32, type_name: &str) -
 
 fn collect_field_types_from_fields<'a>(fields: &'a Fields) -> Vec<&'a syn::Type> {
     match fields {
-        Fields::Named(named) => named.named.iter().map(|field| &field.ty).collect(),
-        Fields::Unnamed(unnamed) => unnamed.unnamed.iter().map(|field| &field.ty).collect(),
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .filter(|field| !is_recursive_field(field))
+            .map(|field| &field.ty)
+            .collect(),
+        Fields::Unnamed(unnamed) => unnamed
+            .unnamed
+            .iter()
+            .filter(|field| !is_recursive_field(field))
+            .map(|field| &field.ty)
+            .collect(),
         Fields::Unit => Vec::new(),
     }
 }
@@ -349,6 +359,22 @@ fn add_state_param(generics: &Generics) -> Generics {
     let mut generics = generics.clone();
     generics.params.push(parse_quote!(__State: ?Sized));
     generics
+}
+
+fn is_recursive_field(field: &syn::Field) -> bool {
+    field.attrs.iter().any(|attr| {
+        if attr.path().is_ident("serde_state") {
+            let mut recursive = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("recursive") {
+                    recursive = true;
+                }
+                Ok(())
+            });
+            return recursive;
+        }
+        false
+    })
 }
 
 struct ContainerAttributes {

@@ -8,7 +8,7 @@ mod de;
 mod dummy;
 mod ser;
 
-#[proc_macro_derive(SerializeState, attributes(serde, serde_state))]
+#[proc_macro_derive(SerializeState, attributes(serde, serde_state, recursive))]
 pub fn derive_serialize(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     ser::expand_derive_serialize(&input)
@@ -16,7 +16,7 @@ pub fn derive_serialize(input: TokenStream) -> TokenStream {
         .into()
 }
 
-#[proc_macro_derive(DeserializeState, attributes(serde, serde_state))]
+#[proc_macro_derive(DeserializeState, attributes(serde, serde_state, recursive))]
 pub fn derive_deserialize(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     de::expand_derive_deserialize(&input)

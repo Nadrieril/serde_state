@@ -58,3 +58,16 @@ let mut buffer = Vec::new();
 }
 assert_eq!(state.serialized.get(), 2);
 ```
+
+### Recursive structures
+
+Because this uses perfect derives, the derive macro causes trait errors on recursive types. To solve
+this, annotate recursive fields with `#[serde_state(recursive)`.
+
+```rust
+#[derive(SerializeState, DeserializeState)]
+enum CounterList {
+    Nil,
+    Cons(CounterValue, #[serde_state(recursive) Box<CounterList>),
+}
+```
