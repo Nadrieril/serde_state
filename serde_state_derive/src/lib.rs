@@ -6,6 +6,7 @@ use syn::DeriveInput;
 
 mod de;
 mod dummy;
+mod mode;
 mod ser;
 
 #[proc_macro_derive(SerializeState, attributes(serde, serde_state))]

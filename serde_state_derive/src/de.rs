@@ -1,4 +1,7 @@
-use crate::dummy;
+use crate::{
+    dummy,
+    mode::{attrs_mode, merge_modes, ItemMode},
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
@@ -6,16 +9,6 @@ use syn::{
     parse_quote, Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed,
     FieldsUnnamed, GenericParam, Generics, Type,
 };
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ItemMode {
-    Stateful,
-    Stateless,
-}
-
-fn merge_modes(default: ItemMode, override_mode: Option<ItemMode>) -> ItemMode {
-    override_mode.unwrap_or(default)
-}
 
 pub fn expand_derive_deserialize(input: &DeriveInput) -> syn::Result<TokenStream> {
     let attrs = ContainerAttributes::from_attrs(&input.attrs)?;
@@ -154,7 +147,7 @@ fn deserialize_transparent(
             let field = named.named.first().unwrap();
             let field_ident = field.ident.as_ref().unwrap();
             let ty = &field.ty;
-            Ok(match merge_modes(mode, field_mode(&field.attrs)) {
+            Ok(match merge_modes(mode, attrs_mode(&field.attrs)) {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
                     let #field_ident = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
@@ -169,7 +162,7 @@ fn deserialize_transparent(
         Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
             let field = unnamed.unnamed.first().unwrap();
             let ty = &field.ty;
-            Ok(match merge_modes(mode, field_mode(&field.attrs)) {
+            Ok(match merge_modes(mode, attrs_mode(&field.attrs)) {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
                     let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
@@ -306,7 +299,7 @@ fn deserialize_named_struct(
             let ident = field.ident.as_ref().unwrap();
             let name = ident.to_string();
             let ty = &field.ty;
-            let assignment = match merge_modes(mode, field_mode(&field.attrs)) {
+            let assignment = match merge_modes(mode, attrs_mode(&field.attrs)) {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
                     #ident = ::core::option::Option::Some(
@@ -465,7 +458,7 @@ fn deserialize_newtype_struct(
         visitor_impl_generics_tokens(generics, infer_state);
     let (_, ty_generics, _) = generics.split_for_impl();
     let phantom_type = phantom_type(ident, generics);
-    let field_mode = merge_modes(mode, field_mode(&field.attrs));
+    let field_mode = merge_modes(mode, attrs_mode(&field.attrs));
 
     let newtype_body = match field_mode {
         ItemMode::Stateful => quote! {
@@ -580,7 +573,7 @@ fn deserialize_tuple_struct(
         let binding = &bindings[index];
         let ty = &field.ty;
         let idx = index;
-        match merge_modes(mode, field_mode(&field.attrs)) {
+        match merge_modes(mode, attrs_mode(&field.attrs)) {
             ItemMode::Stateful => quote! {
                 let #binding = match _serde::de::SeqAccess::next_element_seed(
                     &mut __seq,
@@ -853,7 +846,7 @@ fn deserialize_enum_variant_arm(
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             let field = fields.unnamed.first().unwrap();
             let ty = &field.ty;
-            let field_mode = merge_modes(variant_mode, field_mode(&field.attrs));
+            let field_mode = merge_modes(variant_mode, attrs_mode(&field.attrs));
             match field_mode {
                 ItemMode::Stateful => quote! {
                     (__Variant::#variant_ident, __variant) => {
@@ -947,7 +940,7 @@ fn tuple_variant_visitor(
         let binding = &bindings[index];
         let ty = &field.ty;
         let idx = index;
-        match merge_modes(mode, field_mode(&field.attrs)) {
+        match merge_modes(mode, attrs_mode(&field.attrs)) {
             ItemMode::Stateful => quote! {
                 let #binding = match _serde::de::SeqAccess::next_element_seed(
                     &mut __seq,
@@ -1112,7 +1105,7 @@ fn struct_variant_helpers(
             let ident = field.ident.as_ref().unwrap();
             let ty = &field.ty;
             let name = ident.to_string();
-            let assignment = match merge_modes(mode, field_mode(&field.attrs)) {
+            let assignment = match merge_modes(mode, attrs_mode(&field.attrs)) {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
                     #ident = ::core::option::Option::Some(
@@ -1242,7 +1235,7 @@ fn collect_field_types_from_fields<'a>(
             .map(|field| {
                 FieldType::new(
                     &field.ty,
-                    merge_modes(default_mode, field_mode(&field.attrs)),
+                    merge_modes(default_mode, attrs_mode(&field.attrs)),
                 )
             })
             .collect(),
@@ -1252,7 +1245,7 @@ fn collect_field_types_from_fields<'a>(
             .map(|field| {
                 FieldType::new(
                     &field.ty,
-                    merge_modes(default_mode, field_mode(&field.attrs)),
+                    merge_modes(default_mode, attrs_mode(&field.attrs)),
                 )
             })
             .collect(),
@@ -1384,30 +1377,6 @@ fn visitor_impl_generics_tokens(
 fn phantom_type(ident: &syn::Ident, generics: &Generics) -> TokenStream {
     let (_, ty_generics, _) = generics.split_for_impl();
     quote!(#ident #ty_generics)
-}
-
-fn field_mode(attrs: &[Attribute]) -> Option<ItemMode> {
-    attrs_mode(attrs)
-}
-
-fn attrs_mode(attrs: &[Attribute]) -> Option<ItemMode> {
-    let mut mode = None;
-    for attr in attrs {
-        if attr.path().is_ident("serde_state") {
-            let _ = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("stateless") {
-                    mode = Some(ItemMode::Stateless);
-                    return Ok(());
-                }
-                if meta.path.is_ident("stateful") {
-                    mode = Some(ItemMode::Stateful);
-                    return Ok(());
-                }
-                Ok(())
-            });
-        }
-    }
-    mode
 }
 
 struct ContainerAttributes {

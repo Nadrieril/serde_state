@@ -1,4 +1,7 @@
-use crate::dummy;
+use crate::{
+    dummy,
+    mode::{attrs_mode, merge_modes, ItemMode},
+};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
@@ -6,36 +9,6 @@ use syn::{
     parse_quote, Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed,
     FieldsUnnamed, Generics, Type,
 };
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ItemMode {
-    Stateful,
-    Stateless,
-}
-
-fn merge_modes(default: ItemMode, override_mode: Option<ItemMode>) -> ItemMode {
-    override_mode.unwrap_or(default)
-}
-
-fn attrs_mode(attrs: &[Attribute]) -> Option<ItemMode> {
-    let mut mode = None;
-    for attr in attrs {
-        if attr.path().is_ident("serde_state") {
-            let _ = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("stateless") {
-                    mode = Some(ItemMode::Stateless);
-                    return Ok(());
-                }
-                if meta.path.is_ident("stateful") {
-                    mode = Some(ItemMode::Stateful);
-                    return Ok(());
-                }
-                Ok(())
-            });
-        }
-    }
-    mode
-}
 
 pub fn expand_derive_serialize(input: &DeriveInput) -> syn::Result<TokenStream> {
     let attrs = ContainerAttributes::from_attrs(&input.attrs)?;
@@ -187,7 +160,7 @@ fn serialize_transparent_call(
     default_mode: ItemMode,
     value: TokenStream,
 ) -> TokenStream {
-    match merge_modes(default_mode, field_mode(&field.attrs)) {
+    match merge_modes(default_mode, attrs_mode(&field.attrs)) {
         ItemMode::Stateful => quote! {
             _serde_state::SerializeState::serialize_state(#value, __state, __serializer)
         },
@@ -282,16 +255,12 @@ fn serialize_field_expr(
     default_mode: ItemMode,
     value: TokenStream,
 ) -> TokenStream {
-    match merge_modes(default_mode, field_mode(&field.attrs)) {
+    match merge_modes(default_mode, attrs_mode(&field.attrs)) {
         ItemMode::Stateful => {
             quote!(&_serde_state::__private::wrap_serialize(#value, __state))
         }
         ItemMode::Stateless => quote!(#value),
     }
-}
-
-fn field_mode(attrs: &[Attribute]) -> Option<ItemMode> {
-    attrs_mode(attrs)
 }
 
 fn serialize_enum_body(ident: &syn::Ident, data: &DataEnum, mode: ItemMode) -> TokenStream {
@@ -438,7 +407,7 @@ fn collect_field_types_from_fields<'a>(
             .map(|field| {
                 FieldType::new(
                     &field.ty,
-                    merge_modes(default_mode, field_mode(&field.attrs)),
+                    merge_modes(default_mode, attrs_mode(&field.attrs)),
                 )
             })
             .collect(),
@@ -448,7 +417,7 @@ fn collect_field_types_from_fields<'a>(
             .map(|field| {
                 FieldType::new(
                     &field.ty,
-                    merge_modes(default_mode, field_mode(&field.attrs)),
+                    merge_modes(default_mode, attrs_mode(&field.attrs)),
                 )
             })
             .collect(),
