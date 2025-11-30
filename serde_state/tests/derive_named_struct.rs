@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use serde_json::json;
 use serde_state::{DeserializeState, SerializeState};
-use std::cell::Cell;
+use std::{cell::Cell, marker::PhantomData};
 
 #[derive(Default)]
 struct Recorder {
@@ -46,6 +46,45 @@ struct Example {
 struct Wrapper {
     inner: CounterValue,
 }
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(state = Recorder)]
+struct Pair(CounterValue, CounterValue);
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+struct Empty;
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+struct PlainNumbers {
+    value: u32,
+}
+
+#[derive(Clone, SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(state = Recorder)]
+enum Action {
+    Idle,
+    Reset(CounterValue),
+    Combine(CounterValue, CounterValue),
+    Record {
+        first: CounterValue,
+        second: CounterValue,
+    },
+}
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+struct PhantomWrapper {
+    marker: PhantomData<NeedsNoBounds>,
+}
+
+impl Default for PhantomWrapper {
+    fn default() -> Self {
+        Self {
+            marker: PhantomData,
+        }
+    }
+}
+
+struct NeedsNoBounds;
 
 #[test]
 fn serialize_named_struct_threads_state() {
@@ -109,4 +148,120 @@ fn transparent_struct_behaves_like_inner_value() {
         }
     );
     assert_eq!(state.deserialized.get(), 1);
+}
+
+#[test]
+fn plain_struct_does_not_need_state_attribute() {
+    let state = ();
+    let numbers = PlainNumbers { value: 42 };
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        numbers
+            .serialize_state(&state, &mut serializer)
+            .expect("plain serialization");
+    }
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, json!({ "value": 42 }));
+
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = PlainNumbers::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded, numbers);
+}
+
+#[test]
+fn tuple_and_unit_structs_thread_state() {
+    let pair = Pair(CounterValue(7), CounterValue(8));
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        pair.serialize_state(&state, &mut serializer)
+            .expect("tuple serialization");
+    }
+    assert_eq!(state.serialized.get(), 2);
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, json!([7, 8]));
+
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = Pair::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded, pair);
+    assert_eq!(state.deserialized.get(), 2);
+
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        Empty
+            .serialize_state(&state, &mut serializer)
+            .expect("unit serialization");
+    }
+    assert_eq!(state.serialized.get(), 0);
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, serde_json::Value::Null);
+
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = Empty::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded, Empty);
+    assert_eq!(state.deserialized.get(), 0);
+}
+
+#[test]
+fn enums_thread_state_for_each_variant() {
+    fn run_case(action: Action, expected_json: serde_json::Value, expected_hits: usize) {
+        let state = Recorder::default();
+        let mut buffer = Vec::new();
+        {
+            let mut serializer = serde_json::Serializer::new(&mut buffer);
+            action
+                .serialize_state(&state, &mut serializer)
+                .expect("enum serialization");
+        }
+        assert_eq!(state.serialized.get(), expected_hits);
+        let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+        assert_eq!(json_value, expected_json);
+
+        let state = Recorder::default();
+        let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+        let decoded = Action::deserialize_state(&state, &mut deserializer).unwrap();
+        assert_eq!(decoded, action);
+        assert_eq!(state.deserialized.get(), expected_hits);
+    }
+
+    run_case(Action::Idle, json!("Idle"), 0);
+    run_case(Action::Reset(CounterValue(9)), json!({"Reset": 9}), 1);
+    run_case(
+        Action::Combine(CounterValue(10), CounterValue(11)),
+        json!({"Combine": [10, 11]}),
+        2,
+    );
+    run_case(
+        Action::Record {
+            first: CounterValue(12),
+            second: CounterValue(13),
+        },
+        json!({"Record": {"first": 12, "second": 13}}),
+        2,
+    );
+}
+
+#[test]
+fn perfect_derive_does_not_require_generic_bounds() {
+    let ser_state = Recorder::default();
+    let wrapper = PhantomWrapper::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        wrapper
+            .serialize_state(&ser_state, &mut serializer)
+            .expect("phantom serialization");
+    }
+    assert_eq!(ser_state.serialized.get(), 0);
+    let de_state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = PhantomWrapper::deserialize_state(&de_state, &mut deserializer).unwrap();
+    assert_eq!(decoded, wrapper);
+    assert_eq!(de_state.deserialized.get(), 0);
 }
