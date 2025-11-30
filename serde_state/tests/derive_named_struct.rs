@@ -12,7 +12,7 @@ struct Recorder {
 #[derive(Clone, Debug, PartialEq)]
 struct CounterValue(u32);
 
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
 struct PlainValue(u32);
 
 impl SerializeState<Recorder> for CounterValue {
@@ -105,6 +105,14 @@ enum Action {
 #[derive(SerializeState, DeserializeState, Debug, Default, PartialEq)]
 struct PhantomWrapper {
     marker: PhantomData<NeedsNoBounds>,
+}
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+struct RenamedAndSkipped {
+    #[serde(rename = "external")]
+    renamed: CounterValue,
+    #[serde(skip)]
+    skipped: PlainValue,
 }
 
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
@@ -396,6 +404,33 @@ fn stateless_variants_control_state_usage() {
         }),
         1
     );
+}
+
+#[test]
+fn serde_rename_and_skip_are_respected() {
+    let value = RenamedAndSkipped {
+        renamed: CounterValue(5),
+        skipped: PlainValue(6),
+    };
+
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        value
+            .serialize_state(&state, &mut serializer)
+            .expect("rename serialization");
+    }
+    assert_eq!(state.serialized.get(), 1);
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, json!({"external": 5}));
+
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = RenamedAndSkipped::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded.renamed, CounterValue(5));
+    assert_eq!(decoded.skipped, PlainValue(0));
+    assert_eq!(state.deserialized.get(), 1);
 }
 
 #[test]

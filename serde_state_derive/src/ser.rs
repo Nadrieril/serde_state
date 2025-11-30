@@ -1,4 +1,5 @@
 use crate::{
+    attrs::parse_field_attrs,
     dummy,
     mode::{attrs_mode, merge_modes, ItemMode},
 };
@@ -180,19 +181,28 @@ fn serialize_struct_body(ident: &syn::Ident, fields: &Fields, mode: ItemMode) ->
 
 fn serialize_named_fields(ident: &syn::Ident, fields: &FieldsNamed, mode: ItemMode) -> TokenStream {
     let type_name = ident.to_string();
-    let len = fields.named.len();
-    let serialize_fields = fields.named.iter().map(|field| {
-        let field_ident = field.ident.as_ref().unwrap();
-        let key = field_ident.to_string();
-        let call = serialize_field_expr(field, mode, quote!(&self.#field_ident));
-        quote! {
-        _serde::ser::SerializeStruct::serialize_field(
-            &mut __serde_state,
-            #key,
-                    #call,
-                )?;
-            }
-    });
+    let field_infos: Vec<_> = fields
+        .named
+        .iter()
+        .map(|field| (field, parse_field_attrs(&field.attrs)))
+        .collect();
+    let len = field_infos.iter().filter(|(_, attrs)| !attrs.skip).count();
+    let serialize_fields =
+        field_infos
+            .iter()
+            .filter(|(_, attrs)| !attrs.skip)
+            .map(|(field, attrs)| {
+                let field_ident = field.ident.as_ref().unwrap();
+                let key = attrs.key(field_ident);
+                let call = serialize_field_expr(field, mode, quote!(&self.#field_ident));
+                quote! {
+                    _serde::ser::SerializeStruct::serialize_field(
+                        &mut __serde_state,
+                        #key,
+                        #call,
+                    )?;
+                }
+            });
 
     quote! {
         let mut __serde_state = _serde::Serializer::serialize_struct(__serializer, #type_name, #len)?;
@@ -352,22 +362,28 @@ fn serialize_enum_variant(
                 .iter()
                 .map(|field| field.ident.as_ref().unwrap())
                 .collect();
-            let field_names: Vec<_> = field_idents.iter().map(|ident| ident.to_string()).collect();
-            let len = field_idents.len();
-            let serialize_fields = field_idents
+            let field_infos: Vec<_> = fields
+                .named
                 .iter()
-                .zip(field_names.iter())
-                .zip(fields.named.iter())
-                .map(|((ident, name), field)| {
-                    let call = serialize_field_expr(field, mode, quote!(#ident));
-                    quote! {
-                        _serde::ser::SerializeStructVariant::serialize_field(
-                            &mut __serde_state,
-                            #name,
-                            #call,
-                        )?;
-                    }
-                });
+                .map(|field| (field, parse_field_attrs(&field.attrs)))
+                .collect();
+            let len = field_infos.iter().filter(|(_, attrs)| !attrs.skip).count();
+            let serialize_fields =
+                field_infos
+                    .iter()
+                    .filter(|(_, attrs)| !attrs.skip)
+                    .map(|(field, attrs)| {
+                        let ident = field.ident.as_ref().unwrap();
+                        let name = attrs.key(ident);
+                        let call = serialize_field_expr(field, mode, quote!(#ident));
+                        quote! {
+                            _serde::ser::SerializeStructVariant::serialize_field(
+                                &mut __serde_state,
+                                #name,
+                                #call,
+                            )?;
+                        }
+                    });
             quote! {
                 Self::#variant_ident { #(ref #field_idents),* } => {
                     let mut __serde_state = _serde::Serializer::serialize_struct_variant(
@@ -404,21 +420,29 @@ fn collect_field_types_from_fields<'a>(
         Fields::Named(named) => named
             .named
             .iter()
-            .map(|field| {
-                FieldType::new(
+            .filter_map(|field| {
+                let attrs = parse_field_attrs(&field.attrs);
+                if attrs.skip {
+                    return None;
+                }
+                Some(FieldType::new(
                     &field.ty,
                     merge_modes(default_mode, attrs_mode(&field.attrs)),
-                )
+                ))
             })
             .collect(),
         Fields::Unnamed(unnamed) => unnamed
             .unnamed
             .iter()
-            .map(|field| {
-                FieldType::new(
+            .filter_map(|field| {
+                let attrs = parse_field_attrs(&field.attrs);
+                if attrs.skip {
+                    return None;
+                }
+                Some(FieldType::new(
                     &field.ty,
                     merge_modes(default_mode, attrs_mode(&field.attrs)),
-                )
+                ))
             })
             .collect(),
         Fields::Unit => Vec::new(),

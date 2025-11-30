@@ -1,4 +1,5 @@
 use crate::{
+    attrs::parse_field_attrs,
     dummy,
     mode::{attrs_mode, merge_modes, ItemMode},
 };
@@ -50,6 +51,7 @@ fn derive_struct(
             attrs.mode,
         );
     }
+    add_default_bounds_for_skipped(&data.fields, &mut where_clause);
     let where_clause_tokens = quote_where_clause(&where_clause);
     let ident = &input.ident;
 
@@ -106,6 +108,9 @@ fn derive_enum(
             &state_tokens,
             attrs.mode,
         );
+    }
+    for variant in &data.variants {
+        add_default_bounds_for_skipped(&variant.fields, &mut where_clause);
     }
     let where_clause_tokens = quote_where_clause(&where_clause);
     let ident = &input.ident;
@@ -222,15 +227,27 @@ fn deserialize_named_struct(
     where_clause: &Option<syn::WhereClause>,
     mode: ItemMode,
 ) -> TokenStream {
-    let field_names: Vec<String> = fields
+    let field_infos: Vec<_> = fields
         .named
         .iter()
-        .map(|field| field.ident.as_ref().unwrap().to_string())
+        .map(|field| (field, parse_field_attrs(&field.attrs)))
+        .collect();
+    let included: Vec<_> = field_infos
+        .iter()
+        .filter(|(_, attrs)| !attrs.skip)
         .collect();
 
-    let field_variants: Vec<_> = field_names
+    let field_names: Vec<String> = included
         .iter()
-        .map(|name| format_ident!("__field_{}", name))
+        .map(|(field, attrs)| attrs.key(field.ident.as_ref().unwrap()))
+        .collect();
+
+    let field_variants: Vec<_> = included
+        .iter()
+        .map(|(field, _)| {
+            let name = field.ident.as_ref().unwrap().to_string();
+            format_ident!("__field_{}", name)
+        })
         .collect();
 
     let const_fields = {
@@ -286,18 +303,21 @@ fn deserialize_named_struct(
         }
     };
 
-    let init_locals = fields.named.iter().map(|field| {
+    let init_locals = field_infos.iter().map(|(field, attrs)| {
         let ident = field.ident.as_ref().unwrap();
-        quote!(let mut #ident = ::core::option::Option::None;)
+        if attrs.skip {
+            quote!()
+        } else {
+            quote!(let mut #ident = ::core::option::Option::None;)
+        }
     });
 
-    let match_arms = fields
-        .named
+    let match_arms = included
         .iter()
         .zip(field_variants.iter())
-        .map(|(field, variant)| {
+        .map(|((field, attrs), variant)| {
             let ident = field.ident.as_ref().unwrap();
-            let name = ident.to_string();
+            let name = attrs.key(ident);
             let ty = &field.ty;
             let assignment = match merge_modes(mode, attrs_mode(&field.attrs)) {
                 ItemMode::Stateful => quote! {
@@ -322,20 +342,26 @@ fn deserialize_named_struct(
             }
         });
 
-    let build_fields = fields.named.iter().map(|field| {
+    let build_fields = field_infos.iter().map(|(field, attrs)| {
         let ident = field.ident.as_ref().unwrap();
-        let name = ident.to_string();
-        quote! {
-            let #ident = match #ident {
-                ::core::option::Option::Some(value) => value,
-                ::core::option::Option::None =>
-                    return ::core::result::Result::Err(_serde::de::Error::missing_field(#name)),
-            };
+        if attrs.skip {
+            quote! {
+                let #ident = ::core::default::Default::default();
+            }
+        } else {
+            let name = attrs.key(ident);
+            quote! {
+                let #ident = match #ident {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None =>
+                        return ::core::result::Result::Err(_serde::de::Error::missing_field(#name)),
+                };
+            }
         }
     });
 
     let construct = {
-        let pairs = fields.named.iter().map(|field| {
+        let pairs = field_infos.iter().map(|(field, _)| {
             let ident = field.ident.as_ref().unwrap();
             quote!(#ident: #ident)
         });
@@ -1022,19 +1048,30 @@ fn struct_variant_helpers(
     field_array_ident: &syn::Ident,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
-    let field_names: Vec<String> = fields
+    let field_infos: Vec<_> = fields
         .named
         .iter()
-        .map(|field| field.ident.as_ref().unwrap().to_string())
+        .map(|field| (field, parse_field_attrs(&field.attrs)))
+        .collect();
+    let included: Vec<_> = field_infos
+        .iter()
+        .filter(|(_, attrs)| !attrs.skip)
         .collect();
     let field_idents: Vec<_> = fields
         .named
         .iter()
         .map(|field| field.ident.as_ref().unwrap())
         .collect();
-    let field_variants: Vec<_> = field_names
+    let field_names: Vec<String> = included
         .iter()
-        .map(|name| format_ident!("__variant_field_{}", name))
+        .map(|(field, attrs)| attrs.key(field.ident.as_ref().unwrap()))
+        .collect();
+    let field_variants: Vec<_> = included
+        .iter()
+        .map(|(field, _)| {
+            let name = field.ident.as_ref().unwrap().to_string();
+            format_ident!("__variant_field_{}", name)
+        })
         .collect();
 
     let const_fields = {
@@ -1093,18 +1130,22 @@ fn struct_variant_helpers(
         }
     };
 
-    let init_locals = field_idents
-        .iter()
-        .map(|ident| quote!(let mut #ident = ::core::option::Option::None;));
+    let init_locals = field_infos.iter().map(|(field, attrs)| {
+        let ident = field.ident.as_ref().unwrap();
+        if attrs.skip {
+            quote!()
+        } else {
+            quote!(let mut #ident = ::core::option::Option::None;)
+        }
+    });
 
-    let match_arms = fields
-        .named
+    let match_arms = included
         .iter()
         .zip(field_variants.iter())
-        .map(|(field, variant)| {
+        .map(|((field, attrs), variant)| {
             let ident = field.ident.as_ref().unwrap();
             let ty = &field.ty;
-            let name = ident.to_string();
+            let field_name = attrs.key(ident);
             let assignment = match merge_modes(mode, attrs_mode(&field.attrs)) {
                 ItemMode::Stateful => quote! {
                     let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
@@ -1121,21 +1162,28 @@ fn struct_variant_helpers(
             quote! {
                 #field_enum_ident::#variant => {
                     if #ident.is_some() {
-                        return ::core::result::Result::Err(_serde::de::Error::duplicate_field(#name));
+                        return ::core::result::Result::Err(_serde::de::Error::duplicate_field(#field_name));
                     }
                     #assignment
                 }
             }
         });
 
-    let build_fields = field_idents.iter().map(|ident| {
-        let name = ident.to_string();
-        quote! {
-            let #ident = match #ident {
-                ::core::option::Option::Some(value) => value,
-                ::core::option::Option::None =>
-                    return ::core::result::Result::Err(_serde::de::Error::missing_field(#name)),
-            };
+    let build_fields = field_infos.iter().map(|(field, attrs)| {
+        let ident = field.ident.as_ref().unwrap();
+        if attrs.skip {
+            quote! {
+                let #ident = ::core::default::Default::default();
+            }
+        } else {
+            let name = attrs.key(ident);
+            quote! {
+                let #ident = match #ident {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None =>
+                        return ::core::result::Result::Err(_serde::de::Error::missing_field(#name)),
+                };
+            }
         }
     });
 
@@ -1232,21 +1280,29 @@ fn collect_field_types_from_fields<'a>(
         Fields::Named(named) => named
             .named
             .iter()
-            .map(|field| {
-                FieldType::new(
+            .filter_map(|field| {
+                let attrs = parse_field_attrs(&field.attrs);
+                if attrs.skip {
+                    return None;
+                }
+                Some(FieldType::new(
                     &field.ty,
                     merge_modes(default_mode, attrs_mode(&field.attrs)),
-                )
+                ))
             })
             .collect(),
         Fields::Unnamed(unnamed) => unnamed
             .unnamed
             .iter()
-            .map(|field| {
-                FieldType::new(
+            .filter_map(|field| {
+                let attrs = parse_field_attrs(&field.attrs);
+                if attrs.skip {
+                    return None;
+                }
+                Some(FieldType::new(
                     &field.ty,
                     merge_modes(default_mode, attrs_mode(&field.attrs)),
-                )
+                ))
             })
             .collect(),
         Fields::Unit => Vec::new(),
@@ -1377,6 +1433,38 @@ fn visitor_impl_generics_tokens(
 fn phantom_type(ident: &syn::Ident, generics: &Generics) -> TokenStream {
     let (_, ty_generics, _) = generics.split_for_impl();
     quote!(#ident #ty_generics)
+}
+
+fn add_default_bounds_for_skipped(fields: &Fields, where_clause: &mut Option<syn::WhereClause>) {
+    match fields {
+        Fields::Named(named) => {
+            for field in &named.named {
+                let attrs = parse_field_attrs(&field.attrs);
+                if attrs.skip {
+                    push_default_bound(where_clause, &field.ty);
+                }
+            }
+        }
+        Fields::Unnamed(unnamed) => {
+            for field in &unnamed.unnamed {
+                let attrs = parse_field_attrs(&field.attrs);
+                if attrs.skip {
+                    push_default_bound(where_clause, &field.ty);
+                }
+            }
+        }
+        Fields::Unit => {}
+    }
+}
+
+fn push_default_bound(where_clause: &mut Option<syn::WhereClause>, ty: &Type) {
+    let clause = where_clause.get_or_insert_with(|| syn::WhereClause {
+        where_token: Default::default(),
+        predicates: Default::default(),
+    });
+    clause
+        .predicates
+        .push(parse_quote!(#ty: ::core::default::Default));
 }
 
 struct ContainerAttributes {

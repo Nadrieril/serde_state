@@ -86,6 +86,22 @@ enum VariantModes {
 }
 ```
 
+### Renaming and skipping fields
+
+The standard `#[serde(rename = "...")]` and `#[serde(skip)]` field attributes are
+supported. Renamed fields use the provided key during serialization/deserialization, while
+skipped fields are omitted and initialized via `Default::default()` when deserializing.
+
+```rust
+#[derive(SerializeState, DeserializeState)]
+struct Renamed {
+    #[serde(rename = "external")]
+    counter: CounterValue,
+    #[serde(skip)]
+    cached: PlainValue,
+}
+```
+
 ### Recursive structures
 
 Because this uses perfect derives, the derive macro causes trait errors on recursive types. To solve
