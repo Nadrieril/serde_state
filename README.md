@@ -62,12 +62,15 @@ assert_eq!(state.serialized.get(), 2);
 ### Recursive structures
 
 Because this uses perfect derives, the derive macro causes trait errors on recursive types. To solve
-this, annotate recursive fields with `#[serde_state(recursive)`.
+this, opt out of inference by specifying the state explicitly with
+`#[serde_state(state = Recorder)]` (or whichever state type you use). When the state is set manually
+the derive falls back to placing bounds on each type parameter instead of every field.
 
 ```rust
 #[derive(SerializeState, DeserializeState)]
+#[serde_state(state = Recorder)]
 enum CounterList {
     Nil,
-    Cons(CounterValue, #[serde_state(recursive) Box<CounterList>),
+    Cons(CounterValue, Box<CounterList>),
 }
 ```

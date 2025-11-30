@@ -4,7 +4,7 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{
     parse_quote, Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed,
-    FieldsUnnamed, Generics,
+    FieldsUnnamed, Generics, Type,
 };
 
 pub fn expand_derive_serialize(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -28,15 +28,20 @@ fn derive_struct(
     data: &DataStruct,
     attrs: &ContainerAttributes,
 ) -> syn::Result<TokenStream> {
-    let impl_generics_storage = add_state_param(&input.generics);
+    let infer_state = attrs.state.is_none();
+    let impl_generics_storage = add_state_param(&input.generics, infer_state);
     let (impl_generics_ref, _, _) = impl_generics_storage.split_for_impl();
     let impl_generics = quote!(#impl_generics_ref);
     let (_, ty_generics_ref, _) = input.generics.split_for_impl();
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = input.generics.where_clause.clone();
-    let state_tokens = quote!(__State);
+    let state_tokens = state_type_tokens(attrs.state.as_ref());
     let field_types = collect_field_types_from_fields(&data.fields);
-    add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    if infer_state {
+        add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    } else {
+        add_serialize_bounds_from_type_params(&mut where_clause, &input.generics, &state_tokens);
+    }
     let where_clause_tokens = match &where_clause {
         Some(clause) => quote!(#clause),
         None => TokenStream::new(),
@@ -69,17 +74,22 @@ fn derive_struct(
 fn derive_enum(
     input: &DeriveInput,
     data: &DataEnum,
-    _attrs: &ContainerAttributes,
+    attrs: &ContainerAttributes,
 ) -> syn::Result<TokenStream> {
-    let impl_generics_storage = add_state_param(&input.generics);
+    let infer_state = attrs.state.is_none();
+    let impl_generics_storage = add_state_param(&input.generics, infer_state);
     let (impl_generics_ref, _, _) = impl_generics_storage.split_for_impl();
     let impl_generics = quote!(#impl_generics_ref);
     let (_, ty_generics_ref, _) = input.generics.split_for_impl();
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = input.generics.where_clause.clone();
-    let state_tokens = quote!(__State);
+    let state_tokens = state_type_tokens(attrs.state.as_ref());
     let field_types = collect_field_types_from_enum(data);
-    add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    if infer_state {
+        add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    } else {
+        add_serialize_bounds_from_type_params(&mut where_clause, &input.generics, &state_tokens);
+    }
     let where_clause_tokens = match &where_clause {
         Some(clause) => quote!(#clause),
         None => TokenStream::new(),
@@ -310,18 +320,8 @@ fn serialize_enum_variant(variant: &syn::Variant, index: u32, type_name: &str) -
 
 fn collect_field_types_from_fields<'a>(fields: &'a Fields) -> Vec<&'a syn::Type> {
     match fields {
-        Fields::Named(named) => named
-            .named
-            .iter()
-            .filter(|field| !is_recursive_field(field))
-            .map(|field| &field.ty)
-            .collect(),
-        Fields::Unnamed(unnamed) => unnamed
-            .unnamed
-            .iter()
-            .filter(|field| !is_recursive_field(field))
-            .map(|field| &field.ty)
-            .collect(),
+        Fields::Named(named) => named.named.iter().map(|field| &field.ty).collect(),
+        Fields::Unnamed(unnamed) => unnamed.unnamed.iter().map(|field| &field.ty).collect(),
         Fields::Unit => Vec::new(),
     }
 }
@@ -355,31 +355,50 @@ fn add_serialize_bounds_from_types(
     }
 }
 
-fn add_state_param(generics: &Generics) -> Generics {
-    let mut generics = generics.clone();
-    generics.params.push(parse_quote!(__State: ?Sized));
-    generics
+fn add_serialize_bounds_from_type_params(
+    where_clause: &mut Option<syn::WhereClause>,
+    generics: &Generics,
+    state_ty: &TokenStream,
+) {
+    let type_params: Vec<_> = generics
+        .type_params()
+        .map(|param| param.ident.clone())
+        .collect();
+    if type_params.is_empty() {
+        return;
+    }
+
+    let clause = where_clause.get_or_insert_with(|| syn::WhereClause {
+        where_token: Default::default(),
+        predicates: Default::default(),
+    });
+
+    for ident in type_params {
+        clause
+            .predicates
+            .push(parse_quote!(#ident: _serde_state::SerializeState<#state_ty>));
+    }
 }
 
-fn is_recursive_field(field: &syn::Field) -> bool {
-    field.attrs.iter().any(|attr| {
-        if attr.path().is_ident("serde_state") {
-            let mut recursive = false;
-            let _ = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("recursive") {
-                    recursive = true;
-                }
-                Ok(())
-            });
-            return recursive;
-        }
-        false
-    })
+fn state_type_tokens(state: Option<&syn::Type>) -> TokenStream {
+    match state {
+        Some(ty) => quote!(#ty),
+        None => quote!(__State),
+    }
+}
+
+fn add_state_param(generics: &Generics, infer_state: bool) -> Generics {
+    let mut generics = generics.clone();
+    if infer_state {
+        generics.params.push(parse_quote!(__State: ?Sized));
+    }
+    generics
 }
 
 struct ContainerAttributes {
     transparent: bool,
     serde_path: Option<syn::Path>,
+    state: Option<Type>,
 }
 
 impl ContainerAttributes {
@@ -387,10 +406,13 @@ impl ContainerAttributes {
         let mut result = ContainerAttributes {
             transparent: false,
             serde_path: None,
+            state: None,
         };
 
         for attr in attrs {
-            if !(attr.path().is_ident("serde") || attr.path().is_ident("serde_state")) {
+            let is_serde = attr.path().is_ident("serde");
+            let is_serde_state = attr.path().is_ident("serde_state");
+            if !(is_serde || is_serde_state) {
                 continue;
             }
             attr.parse_nested_meta(|meta| {
@@ -404,11 +426,23 @@ impl ContainerAttributes {
                     return Ok(());
                 }
                 if meta.path.is_ident("state") {
-                    return Err(meta.error(
-                        "`serde_state(state = ..)` is no longer supported; the derive now infers the state",
-                    ));
+                    if !is_serde_state {
+                        return Err(
+                            meta.error("`state` must be specified with `serde_state(state = ..)`")
+                        );
+                    }
+                    if result.state.is_some() {
+                        return Err(meta.error("duplicate `state` attribute"));
+                    }
+                    let ty = meta.value()?.parse()?;
+                    result.state = Some(ty);
+                    return Ok(());
                 }
-                Err(meta.error("unsupported serde attribute"))
+                if is_serde_state {
+                    Err(meta.error("unsupported serde_state attribute"))
+                } else {
+                    Err(meta.error("unsupported serde attribute"))
+                }
             })?;
         }
 

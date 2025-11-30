@@ -4,7 +4,7 @@ use quote::{format_ident, quote};
 use syn::spanned::Spanned;
 use syn::{
     parse_quote, Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, FieldsNamed,
-    FieldsUnnamed, GenericParam, Generics,
+    FieldsUnnamed, GenericParam, Generics, Type,
 };
 
 pub fn expand_derive_deserialize(input: &DeriveInput) -> syn::Result<TokenStream> {
@@ -28,22 +28,34 @@ fn derive_struct(
     data: &DataStruct,
     attrs: &ContainerAttributes,
 ) -> syn::Result<TokenStream> {
-    let impl_generics_with_state = add_state_param(&input.generics);
+    let infer_state = attrs.state.is_none();
+    let impl_generics_with_state = add_state_param(&input.generics, infer_state);
     let (impl_generics_ref, _, _) = impl_generics_with_state.split_for_impl();
     let impl_generics = quote!(#impl_generics_ref);
     let (_, ty_generics_ref, _) = input.generics.split_for_impl();
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = input.generics.where_clause.clone();
-    let state_tokens = quote!(__State);
+    let state_tokens = state_type_tokens(attrs.state.as_ref());
     let field_types = collect_field_types_from_fields(&data.fields);
-    add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    if infer_state {
+        add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    } else {
+        add_deserialize_bounds_from_type_params(&mut where_clause, &input.generics, &state_tokens);
+    }
     let where_clause_tokens = quote_where_clause(&where_clause);
     let ident = &input.ident;
 
     let body = if attrs.transparent {
         deserialize_transparent(ident, &data.fields, &state_tokens)?
     } else {
-        deserialize_struct_body(ident, &data.fields, &state_tokens, &where_clause)
+        deserialize_struct_body(
+            ident,
+            &data.fields,
+            &state_tokens,
+            &input.generics,
+            infer_state,
+            &where_clause,
+        )
     };
 
     Ok(quote! {
@@ -65,21 +77,33 @@ fn derive_struct(
 fn derive_enum(
     input: &DeriveInput,
     data: &DataEnum,
-    _attrs: &ContainerAttributes,
+    attrs: &ContainerAttributes,
 ) -> syn::Result<TokenStream> {
-    let impl_generics_with_state = add_state_param(&input.generics);
+    let infer_state = attrs.state.is_none();
+    let impl_generics_with_state = add_state_param(&input.generics, infer_state);
     let (impl_generics_ref, _, _) = impl_generics_with_state.split_for_impl();
     let impl_generics = quote!(#impl_generics_ref);
     let (_, ty_generics_ref, _) = input.generics.split_for_impl();
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = input.generics.where_clause.clone();
-    let state_tokens = quote!(__State);
+    let state_tokens = state_type_tokens(attrs.state.as_ref());
     let field_types = collect_field_types_from_enum(data);
-    add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    if infer_state {
+        add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
+    } else {
+        add_deserialize_bounds_from_type_params(&mut where_clause, &input.generics, &state_tokens);
+    }
     let where_clause_tokens = quote_where_clause(&where_clause);
     let ident = &input.ident;
 
-    let body = deserialize_enum_body(ident, data, &state_tokens, &where_clause);
+    let body = deserialize_enum_body(
+        ident,
+        data,
+        &state_tokens,
+        &input.generics,
+        infer_state,
+        &where_clause,
+    );
 
     Ok(quote! {
         #[automatically_derived]
@@ -132,13 +156,27 @@ fn deserialize_struct_body(
     ident: &syn::Ident,
     fields: &Fields,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     match fields {
-        Fields::Named(named) => deserialize_named_struct(ident, named, state_tokens, where_clause),
-        Fields::Unnamed(unnamed) => {
-            deserialize_unnamed_struct(ident, unnamed, state_tokens, where_clause)
-        }
+        Fields::Named(named) => deserialize_named_struct(
+            ident,
+            named,
+            state_tokens,
+            generics,
+            infer_state,
+            where_clause,
+        ),
+        Fields::Unnamed(unnamed) => deserialize_unnamed_struct(
+            ident,
+            unnamed,
+            state_tokens,
+            generics,
+            infer_state,
+            where_clause,
+        ),
         Fields::Unit => deserialize_unit_struct(ident),
     }
 }
@@ -147,6 +185,8 @@ fn deserialize_named_struct(
     ident: &syn::Ident,
     fields: &FieldsNamed,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let field_names: Vec<String> = fields
@@ -259,16 +299,23 @@ fn deserialize_named_struct(
         quote!(#ident { #(#pairs),* })
     };
 
+    let (visitor_struct_generics, _) = visitor_struct_generics_tokens(generics, infer_state);
+    let (visitor_impl_generics, visitor_impl_type_generics) =
+        visitor_impl_generics_tokens(generics, infer_state);
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let phantom_type = phantom_type(ident, generics);
+
     let visitor_struct = quote! {
-        struct __Visitor<'state, __State: ?Sized> {
-            state: &'state __State,
+        struct __Visitor #visitor_struct_generics {
+            state: &'state #state_tokens,
+            _marker: ::core::marker::PhantomData<#phantom_type>,
         }
     };
 
     let visitor_where_clause = quote_where_clause(where_clause);
     let visitor_impl = quote! {
-        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> #visitor_where_clause {
-            type Value = #ident;
+        impl #visitor_impl_generics _serde::de::Visitor<'de> for __Visitor #visitor_impl_type_generics #visitor_where_clause {
+            type Value = #ident #ty_generics;
 
             fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 formatter.write_str("struct ")?;
@@ -310,7 +357,10 @@ fn deserialize_named_struct(
             __deserializer,
             stringify!(#ident),
             __FIELDS,
-            __Visitor { state: __state },
+            __Visitor {
+                state: __state,
+                _marker: ::core::marker::PhantomData,
+            },
         )
     }
 }
@@ -319,27 +369,45 @@ fn deserialize_unnamed_struct(
     ident: &syn::Ident,
     fields: &FieldsUnnamed,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     match fields.unnamed.len() {
         0 => deserialize_unit_struct(ident),
         1 => {
             let ty = &fields.unnamed.first().unwrap().ty;
-            deserialize_newtype_struct(ident, ty, state_tokens, where_clause)
+            deserialize_newtype_struct(ident, ty, state_tokens, generics, infer_state, where_clause)
         }
-        _ => deserialize_tuple_struct(ident, fields, state_tokens, where_clause),
+        _ => deserialize_tuple_struct(
+            ident,
+            fields,
+            state_tokens,
+            generics,
+            infer_state,
+            where_clause,
+        ),
     }
 }
 
 fn deserialize_newtype_struct(
     ident: &syn::Ident,
-    field_ty: &syn::Type,
+    field_ty: &Type,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
+    let (visitor_struct_generics, _) = visitor_struct_generics_tokens(generics, infer_state);
+    let (visitor_impl_generics, visitor_impl_type_generics) =
+        visitor_impl_generics_tokens(generics, infer_state);
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let phantom_type = phantom_type(ident, generics);
+
     let visitor_struct = quote! {
-        struct __Visitor<'state, __State: ?Sized> {
-            state: &'state __State,
+        struct __Visitor #visitor_struct_generics {
+            state: &'state #state_tokens,
+            _marker: ::core::marker::PhantomData<#phantom_type>,
         }
     };
 
@@ -380,8 +448,8 @@ fn deserialize_newtype_struct(
 
     let visitor_where_clause = quote_where_clause(where_clause);
     let visitor_impl = quote! {
-        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> #visitor_where_clause {
-            type Value = #ident;
+        impl #visitor_impl_generics _serde::de::Visitor<'de> for __Visitor #visitor_impl_type_generics #visitor_where_clause {
+            type Value = #ident #ty_generics;
 
             fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 formatter.write_str("newtype struct ")?;
@@ -399,7 +467,10 @@ fn deserialize_newtype_struct(
         _serde::Deserializer::deserialize_newtype_struct(
             __deserializer,
             stringify!(#ident),
-            __Visitor { state: __state },
+            __Visitor {
+                state: __state,
+                _marker: ::core::marker::PhantomData,
+            },
         )
     }
 }
@@ -408,6 +479,8 @@ fn deserialize_tuple_struct(
     ident: &syn::Ident,
     fields: &FieldsUnnamed,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let len = fields.unnamed.len();
@@ -429,10 +502,16 @@ fn deserialize_tuple_struct(
     });
 
     let construct = quote!(#ident(#(#bindings),*));
+    let (visitor_struct_generics, _) = visitor_struct_generics_tokens(generics, infer_state);
+    let (visitor_impl_generics, visitor_impl_type_generics) =
+        visitor_impl_generics_tokens(generics, infer_state);
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let phantom_type = phantom_type(ident, generics);
 
     let visitor_struct = quote! {
-        struct __Visitor<'state, __State: ?Sized> {
-            state: &'state __State,
+        struct __Visitor #visitor_struct_generics {
+            state: &'state #state_tokens,
+            _marker: ::core::marker::PhantomData<#phantom_type>,
         }
     };
 
@@ -452,8 +531,8 @@ fn deserialize_tuple_struct(
 
     let visitor_where_clause = quote_where_clause(where_clause);
     let visitor_impl = quote! {
-        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> #visitor_where_clause {
-            type Value = #ident;
+        impl #visitor_impl_generics _serde::de::Visitor<'de> for __Visitor #visitor_impl_type_generics #visitor_where_clause {
+            type Value = #ident #ty_generics;
 
             fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 formatter.write_str("tuple struct ")?;
@@ -472,7 +551,10 @@ fn deserialize_tuple_struct(
             __deserializer,
             stringify!(#ident),
             #len,
-            __Visitor { state: __state },
+            __Visitor {
+                state: __state,
+                _marker: ::core::marker::PhantomData,
+            },
         )
     }
 }
@@ -508,6 +590,8 @@ fn deserialize_enum_body(
     ident: &syn::Ident,
     data: &DataEnum,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let variant_names: Vec<_> = data
@@ -576,22 +660,31 @@ fn deserialize_enum_body(
             ident,
             variant,
             state_tokens,
+            generics,
+            infer_state,
             index,
             &mut helper_tokens,
             where_clause,
         )
     });
 
+    let (visitor_struct_generics, _) = visitor_struct_generics_tokens(generics, infer_state);
+    let (visitor_impl_generics, visitor_impl_type_generics) =
+        visitor_impl_generics_tokens(generics, infer_state);
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let phantom_type = phantom_type(ident, generics);
+
     let visitor_struct = quote! {
-        struct __Visitor<'state, __State: ?Sized> {
-            state: &'state __State,
+        struct __Visitor #visitor_struct_generics {
+            state: &'state #state_tokens,
+            _marker: ::core::marker::PhantomData<#phantom_type>,
         }
     };
 
     let visitor_where_clause = quote_where_clause(where_clause);
     let visitor_impl = quote! {
-        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for __Visitor<'state, __State> #visitor_where_clause {
-            type Value = #ident;
+        impl #visitor_impl_generics _serde::de::Visitor<'de> for __Visitor #visitor_impl_type_generics #visitor_where_clause {
+            type Value = #ident #ty_generics;
 
             fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 formatter.write_str("enum ")?;
@@ -625,7 +718,10 @@ fn deserialize_enum_body(
             __deserializer,
             stringify!(#ident),
             __VARIANTS,
-            __Visitor { state: __state },
+            __Visitor {
+                state: __state,
+                _marker: ::core::marker::PhantomData,
+            },
         )
     }
 }
@@ -634,6 +730,8 @@ fn deserialize_enum_variant_arm(
     ident: &syn::Ident,
     variant: &syn::Variant,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     index: usize,
     helpers: &mut Vec<TokenStream>,
     where_clause: &Option<syn::WhereClause>,
@@ -665,6 +763,8 @@ fn deserialize_enum_variant_arm(
                 variant_ident,
                 fields,
                 state_tokens,
+                generics,
+                infer_state,
                 &visitor_ident,
                 where_clause,
             ));
@@ -674,7 +774,10 @@ fn deserialize_enum_variant_arm(
                     _serde::de::VariantAccess::tuple_variant(
                         __variant,
                         #len,
-                        #visitor_ident { state },
+                        #visitor_ident {
+                            state,
+                            _marker: ::core::marker::PhantomData,
+                        },
                     )
                 }
             }
@@ -687,6 +790,8 @@ fn deserialize_enum_variant_arm(
                 variant_ident,
                 fields,
                 state_tokens,
+                generics,
+                infer_state,
                 &visitor_ident,
                 &field_array_ident,
                 where_clause,
@@ -696,7 +801,10 @@ fn deserialize_enum_variant_arm(
                     _serde::de::VariantAccess::struct_variant(
                         __variant,
                         #field_array_ident,
-                        #visitor_ident { state },
+                        #visitor_ident {
+                            state,
+                            _marker: ::core::marker::PhantomData,
+                        },
                     )
                 }
             }
@@ -709,6 +817,8 @@ fn tuple_variant_visitor(
     variant_ident: &syn::Ident,
     fields: &FieldsUnnamed,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     visitor_ident: &syn::Ident,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
@@ -733,10 +843,17 @@ fn tuple_variant_visitor(
     });
     let construct = quote!(#ident::#variant_ident(#(#bindings),*));
 
+    let (visitor_struct_generics, _) = visitor_struct_generics_tokens(generics, infer_state);
+    let (visitor_impl_generics, visitor_impl_type_generics) =
+        visitor_impl_generics_tokens(generics, infer_state);
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let phantom_type = phantom_type(ident, generics);
+
     let visitor_struct = quote! {
         #[allow(non_camel_case_types)]
-        struct #visitor_ident<'state, __State: ?Sized> {
-            state: &'state __State,
+        struct #visitor_ident #visitor_struct_generics {
+            state: &'state #state_tokens,
+            _marker: ::core::marker::PhantomData<#phantom_type>,
         }
     };
 
@@ -756,8 +873,8 @@ fn tuple_variant_visitor(
 
     let visitor_where_clause = quote_where_clause(where_clause);
     let visitor_impl = quote! {
-        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for #visitor_ident<'state, __State> #visitor_where_clause {
-            type Value = #ident;
+        impl #visitor_impl_generics _serde::de::Visitor<'de> for #visitor_ident #visitor_impl_type_generics #visitor_where_clause {
+            type Value = #ident #ty_generics;
 
             fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 formatter.write_str("tuple variant ")?;
@@ -779,6 +896,8 @@ fn struct_variant_helpers(
     variant_ident: &syn::Ident,
     fields: &FieldsNamed,
     state_tokens: &TokenStream,
+    generics: &Generics,
+    infer_state: bool,
     visitor_ident: &syn::Ident,
     field_array_ident: &syn::Ident,
     where_clause: &Option<syn::WhereClause>,
@@ -895,17 +1014,24 @@ fn struct_variant_helpers(
         quote!(#ident::#variant_ident { #(#pairs),* })
     };
 
+    let (visitor_struct_generics, _) = visitor_struct_generics_tokens(generics, infer_state);
+    let (visitor_impl_generics, visitor_impl_type_generics) =
+        visitor_impl_generics_tokens(generics, infer_state);
+    let (_, ty_generics, _) = generics.split_for_impl();
+    let phantom_type = phantom_type(ident, generics);
+
     let visitor_struct = quote! {
         #[allow(non_camel_case_types)]
-        struct #visitor_ident<'state, __State: ?Sized> {
-            state: &'state __State,
+        struct #visitor_ident #visitor_struct_generics {
+            state: &'state #state_tokens,
+            _marker: ::core::marker::PhantomData<#phantom_type>,
         }
     };
 
     let visitor_where_clause = quote_where_clause(where_clause);
     let visitor_impl = quote! {
-        impl<'de, 'state, __State: ?Sized> _serde::de::Visitor<'de> for #visitor_ident<'state, __State> #visitor_where_clause {
-            type Value = #ident;
+        impl #visitor_impl_generics _serde::de::Visitor<'de> for #visitor_ident #visitor_impl_type_generics #visitor_where_clause {
+            type Value = #ident #ty_generics;
 
             fn expecting(&self, formatter: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
                 formatter.write_str("struct variant ")?;
@@ -947,33 +1073,25 @@ fn struct_variant_helpers(
     }
 }
 
-fn add_state_param(generics: &Generics) -> Generics {
+fn add_state_param(generics: &Generics, infer_state: bool) -> Generics {
     let mut generics = generics.clone();
     let lifetime: syn::LifetimeParam = parse_quote!('de);
     generics.params.insert(0, GenericParam::Lifetime(lifetime));
-    generics.params.push(parse_quote!(__State: ?Sized));
+    if infer_state {
+        generics.params.push(parse_quote!(__State: ?Sized));
+    }
     generics
 }
 
-fn collect_field_types_from_fields<'a>(fields: &'a Fields) -> Vec<&'a syn::Type> {
+fn collect_field_types_from_fields<'a>(fields: &'a Fields) -> Vec<&'a Type> {
     match fields {
-        Fields::Named(named) => named
-            .named
-            .iter()
-            .filter(|field| !is_recursive_field(field))
-            .map(|field| &field.ty)
-            .collect(),
-        Fields::Unnamed(unnamed) => unnamed
-            .unnamed
-            .iter()
-            .filter(|field| !is_recursive_field(field))
-            .map(|field| &field.ty)
-            .collect(),
+        Fields::Named(named) => named.named.iter().map(|field| &field.ty).collect(),
+        Fields::Unnamed(unnamed) => unnamed.unnamed.iter().map(|field| &field.ty).collect(),
         Fields::Unit => Vec::new(),
     }
 }
 
-fn collect_field_types_from_enum<'a>(data: &'a DataEnum) -> Vec<&'a syn::Type> {
+fn collect_field_types_from_enum<'a>(data: &'a DataEnum) -> Vec<&'a Type> {
     let mut result = Vec::new();
     for variant in &data.variants {
         result.extend(collect_field_types_from_fields(&variant.fields));
@@ -983,7 +1101,7 @@ fn collect_field_types_from_enum<'a>(data: &'a DataEnum) -> Vec<&'a syn::Type> {
 
 fn add_deserialize_bounds_from_types(
     where_clause: &mut Option<syn::WhereClause>,
-    field_types: &[&syn::Type],
+    field_types: &[&Type],
     state_ty: &TokenStream,
 ) {
     if field_types.is_empty() {
@@ -1002,6 +1120,31 @@ fn add_deserialize_bounds_from_types(
     }
 }
 
+fn add_deserialize_bounds_from_type_params(
+    where_clause: &mut Option<syn::WhereClause>,
+    generics: &Generics,
+    state_ty: &TokenStream,
+) {
+    let type_params: Vec<_> = generics
+        .type_params()
+        .map(|param| param.ident.clone())
+        .collect();
+    if type_params.is_empty() {
+        return;
+    }
+
+    let clause = where_clause.get_or_insert_with(|| syn::WhereClause {
+        where_token: Default::default(),
+        predicates: Default::default(),
+    });
+
+    for ident in type_params {
+        clause
+            .predicates
+            .push(parse_quote!(#ident: _serde_state::DeserializeState<'de, #state_ty>));
+    }
+}
+
 fn quote_where_clause(clause: &Option<syn::WhereClause>) -> TokenStream {
     match clause {
         Some(clause) => quote!(#clause),
@@ -1009,9 +1152,56 @@ fn quote_where_clause(clause: &Option<syn::WhereClause>) -> TokenStream {
     }
 }
 
+fn state_type_tokens(state: Option<&Type>) -> TokenStream {
+    match state {
+        Some(ty) => quote!(#ty),
+        None => quote!(__State),
+    }
+}
+
+fn base_visitor_generics(generics: &Generics, infer_state: bool) -> Generics {
+    let mut visitor_generics = Generics::default();
+    visitor_generics.params.push(parse_quote!('state));
+    if infer_state {
+        visitor_generics.params.push(parse_quote!(__State: ?Sized));
+    }
+    visitor_generics
+        .params
+        .extend(generics.params.iter().cloned());
+    visitor_generics
+}
+
+fn visitor_struct_generics_tokens(
+    generics: &Generics,
+    infer_state: bool,
+) -> (TokenStream, TokenStream) {
+    let visitor_generics = base_visitor_generics(generics, infer_state);
+    let (impl_generics, ty_generics, _) = visitor_generics.split_for_impl();
+    (quote!(#impl_generics), quote!(#ty_generics))
+}
+
+fn visitor_impl_generics_tokens(
+    generics: &Generics,
+    infer_state: bool,
+) -> (TokenStream, TokenStream) {
+    let struct_generics = base_visitor_generics(generics, infer_state);
+    let (_, ty_generics, _) = struct_generics.split_for_impl();
+
+    let mut impl_generics = base_visitor_generics(generics, infer_state);
+    impl_generics.params.insert(0, parse_quote!('de));
+    let (impl_generics_tokens, _, _) = impl_generics.split_for_impl();
+    (quote!(#impl_generics_tokens), quote!(#ty_generics))
+}
+
+fn phantom_type(ident: &syn::Ident, generics: &Generics) -> TokenStream {
+    let (_, ty_generics, _) = generics.split_for_impl();
+    quote!(#ident #ty_generics)
+}
+
 struct ContainerAttributes {
     transparent: bool,
     serde_path: Option<syn::Path>,
+    state: Option<Type>,
 }
 
 impl ContainerAttributes {
@@ -1019,10 +1209,13 @@ impl ContainerAttributes {
         let mut result = ContainerAttributes {
             transparent: false,
             serde_path: None,
+            state: None,
         };
 
         for attr in attrs {
-            if !(attr.path().is_ident("serde") || attr.path().is_ident("serde_state")) {
+            let is_serde = attr.path().is_ident("serde");
+            let is_serde_state = attr.path().is_ident("serde_state");
+            if !(is_serde || is_serde_state) {
                 continue;
             }
             attr.parse_nested_meta(|meta| {
@@ -1036,30 +1229,26 @@ impl ContainerAttributes {
                     return Ok(());
                 }
                 if meta.path.is_ident("state") {
-                    return Err(meta.error(
-                        "`serde_state(state = ..)` is no longer supported; the derive now infers the state",
-                    ));
+                    if !is_serde_state {
+                        return Err(
+                            meta.error("`state` must be specified with `serde_state(state = ..)`")
+                        );
+                    }
+                    if result.state.is_some() {
+                        return Err(meta.error("duplicate `state` attribute"));
+                    }
+                    let ty = meta.value()?.parse()?;
+                    result.state = Some(ty);
+                    return Ok(());
                 }
-                Err(meta.error("unsupported serde attribute"))
+                if is_serde_state {
+                    Err(meta.error("unsupported serde_state attribute"))
+                } else {
+                    Err(meta.error("unsupported serde attribute"))
+                }
             })?;
         }
 
         Ok(result)
     }
-}
-
-fn is_recursive_field(field: &syn::Field) -> bool {
-    field.attrs.iter().any(|attr| {
-        if attr.path().is_ident("serde_state") {
-            let mut recursive = false;
-            let _ = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("recursive") {
-                    recursive = true;
-                }
-                Ok(())
-            });
-            return recursive;
-        }
-        false
-    })
 }

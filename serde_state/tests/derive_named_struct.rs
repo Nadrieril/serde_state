@@ -72,6 +72,12 @@ struct PhantomWrapper {
     marker: PhantomData<NeedsNoBounds>,
 }
 
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+struct GenericContainer<T> {
+    first: T,
+    second: T,
+}
+
 struct NeedsNoBounds;
 
 #[test]
@@ -255,11 +261,35 @@ fn perfect_derive_does_not_require_generic_bounds() {
 }
 
 #[test]
+fn generic_struct_threads_state() {
+    let value = GenericContainer {
+        first: CounterValue(21),
+        second: CounterValue(22),
+    };
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        value
+            .serialize_state(&state, &mut serializer)
+            .expect("generic serialization");
+    }
+    assert_eq!(state.serialized.get(), 2);
+
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = GenericContainer::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded, value);
+    assert_eq!(state.deserialized.get(), 2);
+}
+
+#[test]
 fn recursive_enum_threads_state() {
     #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+    #[serde_state(state = Recorder)]
     enum CounterList {
         Nil,
-        Cons(CounterValue, #[serde_state(recursive)] Box<CounterList>),
+        Cons(CounterValue, Box<CounterList>),
     }
 
     let list = CounterList::Cons(
@@ -276,13 +306,13 @@ fn recursive_enum_threads_state() {
         list.serialize_state(&state, &mut serializer)
             .expect("recursive serialization");
     }
-    // assert_eq!(state.serialized.get(), 2);
-    // let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
-    // assert_eq!(json_value, json!({"Cons": [1, {"Cons": [2, "Nil"]}]}));
+    assert_eq!(state.serialized.get(), 2);
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, json!({"Cons": [1, {"Cons": [2, "Nil"]}]}));
 
-    // let state = Recorder::default();
-    // let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
-    // let decoded = CounterList::deserialize_state(&state, &mut deserializer).unwrap();
-    // assert_eq!(decoded, list);
-    // assert_eq!(state.deserialized.get(), 2);
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = CounterList::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded, list);
+    assert_eq!(state.deserialized.get(), 2);
 }
