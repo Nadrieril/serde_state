@@ -9,8 +9,36 @@ struct Recorder {
     deserialized: Cell<usize>,
 }
 
+trait RecorderLike {
+    fn mark_serialized(&self);
+    fn mark_deserialized(&self);
+    fn serialized_count(&self) -> usize;
+    fn deserialized_count(&self) -> usize;
+}
+
+impl RecorderLike for Recorder {
+    fn mark_serialized(&self) {
+        self.serialized.set(self.serialized.get() + 1);
+    }
+
+    fn mark_deserialized(&self) {
+        self.deserialized.set(self.deserialized.get() + 1);
+    }
+
+    fn serialized_count(&self) -> usize {
+        self.serialized.get()
+    }
+
+    fn deserialized_count(&self) -> usize {
+        self.deserialized.get()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct CounterValue(u32);
+
+#[derive(Clone, Debug, PartialEq)]
+struct GenericCounterValue(u32);
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Default)]
 struct PlainValue(u32);
@@ -33,6 +61,27 @@ impl<'de> DeserializeState<'de, Recorder> for CounterValue {
         recorder.deserialized.set(recorder.deserialized.get() + 1);
         let value = u32::deserialize(deserializer)?;
         Ok(CounterValue(value))
+    }
+}
+
+impl<State: RecorderLike + ?Sized> SerializeState<State> for GenericCounterValue {
+    fn serialize_state<S>(&self, state: &State, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        state.mark_serialized();
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl<'de, State: RecorderLike + ?Sized> DeserializeState<'de, State> for GenericCounterValue {
+    fn deserialize_state<D>(state: &State, deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        state.mark_deserialized();
+        let value = u32::deserialize(deserializer)?;
+        Ok(GenericCounterValue(value))
     }
 }
 
@@ -147,6 +196,12 @@ struct RenamedAndSkipped {
 struct GenericContainer<T> {
     first: T,
     second: T,
+}
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(state_implements = RecorderLike)]
+struct TraitBoundContainer {
+    value: GenericCounterValue,
 }
 
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
@@ -466,6 +521,31 @@ fn serde_rename_and_skip_are_respected() {
     assert_eq!(decoded.renamed, CounterValue(5));
     assert_eq!(decoded.skipped, PlainValue(0));
     assert_eq!(state.deserialized.get(), 1);
+}
+
+#[test]
+fn state_implements_applies_trait_bounds() {
+    let value = TraitBoundContainer {
+        value: GenericCounterValue(12),
+    };
+
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        value
+            .serialize_state(&state, &mut serializer)
+            .expect("trait-bound serialization");
+    }
+    assert_eq!(state.serialized_count(), 1);
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, json!({"value": 12}));
+
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = TraitBoundContainer::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded, value);
+    assert_eq!(state.deserialized_count(), 1);
 }
 
 #[test]

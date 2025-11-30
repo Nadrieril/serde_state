@@ -142,6 +142,7 @@ pub struct ContainerAttributes {
     pub transparent: bool,
     pub serde_path: Option<syn::Path>,
     pub state: Option<Type>,
+    pub state_bound: Option<Type>,
     pub mode: ItemMode,
 }
 
@@ -151,6 +152,7 @@ impl ContainerAttributes {
             transparent: false,
             serde_path: None,
             state: None,
+            state_bound: None,
             mode: ItemMode::Stateful,
         };
 
@@ -179,8 +181,31 @@ impl ContainerAttributes {
                     if result.state.is_some() {
                         return Err(meta.error("duplicate `state` attribute"));
                     }
+                    if result.state_bound.is_some() {
+                        return Err(meta.error(
+                            "`state` cannot be combined with `state_implements`",
+                        ));
+                    }
                     let ty = meta.value()?.parse()?;
                     result.state = Some(ty);
+                    return Ok(());
+                }
+                if meta.path.is_ident("state_implements") {
+                    if !is_serde_state {
+                        return Err(meta.error(
+                            "`state_implements` must be specified with `serde_state(state_implements = ..)`",
+                        ));
+                    }
+                    if result.state_bound.is_some() {
+                        return Err(meta.error("duplicate `state_implements` attribute"));
+                    }
+                    if result.state.is_some() {
+                        return Err(meta.error(
+                            "`state_implements` cannot be combined with `state`",
+                        ));
+                    }
+                    let ty = meta.value()?.parse()?;
+                    result.state_bound = Some(ty);
                     return Ok(());
                 }
                 if meta.path.is_ident("stateless") {

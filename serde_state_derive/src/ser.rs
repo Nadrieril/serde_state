@@ -31,16 +31,23 @@ pub fn expand_derive_serialize(input: &DeriveInput) -> syn::Result<TokenStream> 
 }
 
 fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream> {
-    let infer_state = decl.attrs.state.is_none();
-    let impl_generics_storage = add_state_param(decl.generics, infer_state);
+    let has_explicit_state = decl.attrs.state.is_some();
+    let has_state_bound = decl.attrs.state_bound.is_some();
+    let uses_generic_state = !has_explicit_state;
+    let infer_bounds = !has_explicit_state && !has_state_bound;
+    let impl_generics_storage = add_state_param(
+        decl.generics,
+        uses_generic_state,
+        decl.attrs.state_bound.as_ref(),
+    );
     let (impl_generics_ref, _, _) = impl_generics_storage.split_for_impl();
     let impl_generics = quote!(#impl_generics_ref);
     let (_, ty_generics_ref, _) = decl.generics.split_for_impl();
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = decl.generics.where_clause.clone();
-    let state_tokens = state_type_tokens(decl.attrs.state.as_ref());
+    let state_tokens = state_type_tokens(decl);
     let field_types = collect_field_types_from_fields(&data.fields);
-    if infer_state {
+    if infer_bounds {
         add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     } else {
         add_serialize_bounds_from_type_params(
@@ -80,16 +87,23 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
 }
 
 fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
-    let infer_state = decl.attrs.state.is_none();
-    let impl_generics_storage = add_state_param(decl.generics, infer_state);
+    let has_explicit_state = decl.attrs.state.is_some();
+    let has_state_bound = decl.attrs.state_bound.is_some();
+    let uses_generic_state = !has_explicit_state;
+    let infer_bounds = !has_explicit_state && !has_state_bound;
+    let impl_generics_storage = add_state_param(
+        decl.generics,
+        uses_generic_state,
+        decl.attrs.state_bound.as_ref(),
+    );
     let (impl_generics_ref, _, _) = impl_generics_storage.split_for_impl();
     let impl_generics = quote!(#impl_generics_ref);
     let (_, ty_generics_ref, _) = decl.generics.split_for_impl();
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = decl.generics.where_clause.clone();
-    let state_tokens = state_type_tokens(decl.attrs.state.as_ref());
+    let state_tokens = state_type_tokens(decl);
     let field_types = collect_field_types_from_enum(data);
-    if infer_state {
+    if infer_bounds {
         add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     } else {
         add_serialize_bounds_from_type_params(
@@ -482,17 +496,26 @@ fn add_serialize_bounds_from_type_params(
     }
 }
 
-fn state_type_tokens(state: Option<&Type>) -> TokenStream {
-    match state {
-        Some(ty) => quote!(#ty),
-        None => quote!(__State),
+fn state_type_tokens(decl: &TypeDecl) -> TokenStream {
+    if let Some(ty) = decl.attrs.state.as_ref() {
+        quote!(#ty)
+    } else {
+        quote!(__State)
     }
 }
 
-fn add_state_param(generics: &Generics, infer_state: bool) -> Generics {
+fn add_state_param(
+    generics: &Generics,
+    include_state_param: bool,
+    state_bound: Option<&Type>,
+) -> Generics {
     let mut generics = generics.clone();
-    if infer_state {
-        generics.params.push(parse_quote!(__State: ?Sized));
+    if include_state_param {
+        if let Some(bound) = state_bound {
+            generics.params.push(parse_quote!(__State: ?Sized + #bound));
+        } else {
+            generics.params.push(parse_quote!(__State: ?Sized));
+        }
     }
     generics
 }
