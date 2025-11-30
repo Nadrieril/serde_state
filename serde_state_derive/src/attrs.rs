@@ -1,4 +1,4 @@
-use syn::{Attribute, Ident, LitStr};
+use syn::{Attribute, Ident, LitStr, Path};
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum ItemMode {
@@ -12,6 +12,7 @@ pub struct FieldAttrs {
     pub rename: Option<String>,
     pub skip: bool,
     pub mode: ItemMode,
+    pub with: Option<Path>,
 }
 
 impl Default for FieldAttrs {
@@ -20,6 +21,7 @@ impl Default for FieldAttrs {
             rename: None,
             skip: false,
             mode: ItemMode::Stateful,
+            with: None,
         }
     }
 }
@@ -45,6 +47,11 @@ pub fn parse_field_attrs(attrs: &[Attribute], default_mode: ItemMode) -> syn::Re
                 }
                 if meta.path.is_ident("skip") {
                     result.skip = true;
+                    return Ok(());
+                }
+                if meta.path.is_ident("with") {
+                    let value: LitStr = meta.value()?.parse()?;
+                    result.with = Some(value.parse()?);
                     return Ok(());
                 }
                 Err(meta.error("unsupported serde attribute"))

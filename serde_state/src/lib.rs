@@ -1,3 +1,4 @@
+use serde::Serialize;
 pub use serde_state_derive::{DeserializeState, SerializeState};
 use std::boxed::Box;
 use std::marker::PhantomData;
@@ -90,6 +91,33 @@ impl<'de, State: ?Sized, T> DeserializeState<'de, State> for PhantomData<T> {
         use serde::Deserialize;
         let _ = <serde::de::IgnoredAny>::deserialize(deserializer)?;
         Ok(PhantomData)
+    }
+}
+
+/// A value with attached state. Its Serialize impl calls `T`'s SerializeState impl.
+pub struct WithState<'state, T, State: ?Sized> {
+    value: T,
+    state: &'state State,
+}
+
+impl<'state, T, State> WithState<'state, T, State>
+where
+    State: ?Sized,
+{
+    pub fn new(value: T, state: &'state State) -> Self {
+        Self { value, state }
+    }
+}
+
+impl<T, State: ?Sized> Serialize for WithState<'_, T, State>
+where
+    T: SerializeState<State>,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.value.serialize_state(self.state, serializer)
     }
 }
 

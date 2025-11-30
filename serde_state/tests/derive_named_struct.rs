@@ -36,6 +36,33 @@ impl<'de> DeserializeState<'de, Recorder> for CounterValue {
     }
 }
 
+mod counter_passthrough {
+    use super::CounterValue;
+    use serde::Deserialize;
+
+    pub fn serialize_state<S, State: ?Sized>(
+        value: &CounterValue,
+        _state: &State,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(value.0 + 100)
+    }
+
+    pub fn deserialize_state<'de, State: ?Sized, D>(
+        _state: &State,
+        deserializer: D,
+    ) -> Result<CounterValue, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let stored = u32::deserialize(deserializer)?;
+        Ok(CounterValue(stored - 100))
+    }
+}
+
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 struct Example {
     first: CounterValue,
@@ -119,6 +146,13 @@ struct RenamedAndSkipped {
 struct GenericContainer<T> {
     first: T,
     second: T,
+}
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(state = Recorder)]
+struct WithHelperField {
+    #[serde(with = "counter_passthrough")]
+    counter: CounterValue,
 }
 
 struct NeedsNoBounds;
@@ -431,6 +465,31 @@ fn serde_rename_and_skip_are_respected() {
     assert_eq!(decoded.renamed, CounterValue(5));
     assert_eq!(decoded.skipped, PlainValue(0));
     assert_eq!(state.deserialized.get(), 1);
+}
+
+#[test]
+fn serde_with_calls_custom_helpers() {
+    let value = WithHelperField {
+        counter: CounterValue(7),
+    };
+
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        value
+            .serialize_state(&state, &mut serializer)
+            .expect("with serialization");
+    }
+    assert_eq!(state.serialized.get(), 0);
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, json!({"counter": 107}));
+
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = WithHelperField::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded.counter, CounterValue(7));
+    assert_eq!(state.deserialized.get(), 0);
 }
 
 #[test]

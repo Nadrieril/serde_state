@@ -144,32 +144,46 @@ fn deserialize_transparent(
             let field = &fields.fields[0];
             let field_ident = field.ident().unwrap();
             let ty = field.ty();
-            Ok(match field.mode() {
-                ItemMode::Stateful => quote! {
-                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
-                    let #field_ident = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+            if let Some(with) = &field.attrs.with {
+                Ok(quote! {
+                    let #field_ident: #ty = #with::deserialize_state(__state, __deserializer)?;
                     ::core::result::Result::Ok(#ident { #field_ident: #field_ident })
-                },
-                ItemMode::Stateless => quote! {
-                    let #field_ident: #ty = _serde::Deserialize::deserialize(__deserializer)?;
-                    ::core::result::Result::Ok(#ident { #field_ident: #field_ident })
-                },
-            })
+                })
+            } else {
+                Ok(match field.mode() {
+                    ItemMode::Stateful => quote! {
+                        let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
+                        let #field_ident = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+                        ::core::result::Result::Ok(#ident { #field_ident: #field_ident })
+                    },
+                    ItemMode::Stateless => quote! {
+                        let #field_ident: #ty = _serde::Deserialize::deserialize(__deserializer)?;
+                        ::core::result::Result::Ok(#ident { #field_ident: #field_ident })
+                    },
+                })
+            }
         }
         FieldsStyle::Unnamed if fields.fields.len() == 1 => {
             let field = &fields.fields[0];
             let ty = field.ty();
-            Ok(match field.mode() {
-                ItemMode::Stateful => quote! {
-                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
-                    let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+            if let Some(with) = &field.attrs.with {
+                Ok(quote! {
+                    let __value: #ty = #with::deserialize_state(__state, __deserializer)?;
                     ::core::result::Result::Ok(#ident(__value))
-                },
-                ItemMode::Stateless => quote! {
-                    let __value: #ty = _serde::Deserialize::deserialize(__deserializer)?;
-                    ::core::result::Result::Ok(#ident(__value))
-                },
-            })
+                })
+            } else {
+                Ok(match field.mode() {
+                    ItemMode::Stateful => quote! {
+                        let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
+                        let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+                        ::core::result::Result::Ok(#ident(__value))
+                    },
+                    ItemMode::Stateless => quote! {
+                        let __value: #ty = _serde::Deserialize::deserialize(__deserializer)?;
+                        ::core::result::Result::Ok(#ident(__value))
+                    },
+                })
+            }
         }
         _ => Err(syn::Error::new(
             fields.span,
@@ -299,18 +313,28 @@ fn deserialize_named_struct(
             let ident = field.ident().unwrap();
             let name = field.attrs.key(ident);
             let ty = field.ty();
-            let assignment = match field.mode() {
-                ItemMode::Stateful => quote! {
-                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+            let assignment = if field.attrs.with.is_some() {
+                let seed = with_deserialize_seed(field);
+                quote! {
+                    let __seed = #seed;
                     #ident = ::core::option::Option::Some(
                         _serde::de::MapAccess::next_value_seed(&mut __map, __seed)?,
                     );
-                },
-                ItemMode::Stateless => quote! {
-                    #ident = ::core::option::Option::Some(
-                        _serde::de::MapAccess::next_value::<#ty>(&mut __map)?,
-                    );
-                },
+                }
+            } else {
+                match field.mode() {
+                    ItemMode::Stateful => quote! {
+                        let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+                        #ident = ::core::option::Option::Some(
+                            _serde::de::MapAccess::next_value_seed(&mut __map, __seed)?,
+                        );
+                    },
+                    ItemMode::Stateless => quote! {
+                        #ident = ::core::option::Option::Some(
+                            _serde::de::MapAccess::next_value::<#ty>(&mut __map)?,
+                        );
+                    },
+                }
             };
             quote! {
                 __Field::#variant => {
@@ -462,23 +486,32 @@ fn deserialize_newtype_struct(
     let phantom_type = phantom_type(ident, generics);
     let field_mode = field.mode();
 
-    let newtype_body = match field_mode {
-        ItemMode::Stateful => quote! {
+    let newtype_body = if let Some(with) = &field.attrs.with {
+        quote! {
             let state = self.state;
-            let __seed = _serde_state::__private::wrap_deserialize_seed::<#field_ty, #state_tokens>(state);
-            let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+            let __value: #field_ty = #with::deserialize_state(state, __deserializer)?;
             ::core::result::Result::Ok(#ident(__value))
-        },
-        ItemMode::Stateless => quote! {
-            let __value: #field_ty = _serde::Deserialize::deserialize(__deserializer)?;
-            ::core::result::Result::Ok(#ident(__value))
-        },
+        }
+    } else {
+        match field_mode {
+            ItemMode::Stateful => quote! {
+                let state = self.state;
+                let __seed = _serde_state::__private::wrap_deserialize_seed::<#field_ty, #state_tokens>(state);
+                let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+                ::core::result::Result::Ok(#ident(__value))
+            },
+            ItemMode::Stateless => quote! {
+                let __value: #field_ty = _serde::Deserialize::deserialize(__deserializer)?;
+                ::core::result::Result::Ok(#ident(__value))
+            },
+        }
     };
 
-    let seq_body = match field_mode {
-        ItemMode::Stateful => quote! {
+    let seq_body = if field.attrs.with.is_some() {
+        let seed = with_deserialize_seed(field);
+        quote! {
             let state = self.state;
-            let __seed = _serde_state::__private::wrap_deserialize_seed::<#field_ty, #state_tokens>(state);
+            let __seed = #seed;
             let __value = match _serde::de::SeqAccess::next_element_seed(&mut __seq, __seed)? {
                 ::core::option::Option::Some(value) => value,
                 ::core::option::Option::None =>
@@ -488,18 +521,34 @@ fn deserialize_newtype_struct(
                 return ::core::result::Result::Err(_serde::de::Error::invalid_length(1, &self));
             }
             ::core::result::Result::Ok(#ident(__value))
-        },
-        ItemMode::Stateless => quote! {
-            let __value = match _serde::de::SeqAccess::next_element::<#field_ty>(&mut __seq)? {
-                ::core::option::Option::Some(value) => value,
-                ::core::option::Option::None =>
-                    return ::core::result::Result::Err(_serde::de::Error::invalid_length(0, &self)),
-            };
-            if _serde::de::SeqAccess::next_element::<_serde::de::IgnoredAny>(&mut __seq)?.is_some() {
-                return ::core::result::Result::Err(_serde::de::Error::invalid_length(1, &self));
-            }
-            ::core::result::Result::Ok(#ident(__value))
-        },
+        }
+    } else {
+        match field_mode {
+            ItemMode::Stateful => quote! {
+                let state = self.state;
+                let __seed = _serde_state::__private::wrap_deserialize_seed::<#field_ty, #state_tokens>(state);
+                let __value = match _serde::de::SeqAccess::next_element_seed(&mut __seq, __seed)? {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None =>
+                        return ::core::result::Result::Err(_serde::de::Error::invalid_length(0, &self)),
+                };
+                if _serde::de::SeqAccess::next_element::<_serde::de::IgnoredAny>(&mut __seq)?.is_some() {
+                    return ::core::result::Result::Err(_serde::de::Error::invalid_length(1, &self));
+                }
+                ::core::result::Result::Ok(#ident(__value))
+            },
+            ItemMode::Stateless => quote! {
+                let __value = match _serde::de::SeqAccess::next_element::<#field_ty>(&mut __seq)? {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None =>
+                        return ::core::result::Result::Err(_serde::de::Error::invalid_length(0, &self)),
+                };
+                if _serde::de::SeqAccess::next_element::<_serde::de::IgnoredAny>(&mut __seq)?.is_some() {
+                    return ::core::result::Result::Err(_serde::de::Error::invalid_length(1, &self));
+                }
+                ::core::result::Result::Ok(#ident(__value))
+            },
+        }
     };
 
     let visitor_struct = quote! {
@@ -574,24 +623,36 @@ fn deserialize_tuple_struct(
         let binding = &bindings[index];
         let ty = field.ty();
         let idx = index;
-        match field.mode() {
-            ItemMode::Stateful => quote! {
-                let #binding = match _serde::de::SeqAccess::next_element_seed(
-                    &mut __seq,
-                    _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state),
-                )? {
+        if field.attrs.with.is_some() {
+            let seed = with_deserialize_seed(field);
+            quote! {
+                let __seed = #seed;
+                let #binding = match _serde::de::SeqAccess::next_element_seed(&mut __seq, __seed)? {
                     ::core::option::Option::Some(value) => value,
                     ::core::option::Option::None =>
                         return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
                 };
-            },
-            ItemMode::Stateless => quote! {
-                let #binding = match _serde::de::SeqAccess::next_element::<#ty>(&mut __seq)? {
-                    ::core::option::Option::Some(value) => value,
-                    ::core::option::Option::None =>
-                        return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
-                };
-            },
+            }
+        } else {
+            match field.mode() {
+                ItemMode::Stateful => quote! {
+                    let #binding = match _serde::de::SeqAccess::next_element_seed(
+                        &mut __seq,
+                        _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state),
+                    )? {
+                        ::core::option::Option::Some(value) => value,
+                        ::core::option::Option::None =>
+                            return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
+                    };
+                },
+                ItemMode::Stateless => quote! {
+                    let #binding = match _serde::de::SeqAccess::next_element::<#ty>(&mut __seq)? {
+                        ::core::option::Option::Some(value) => value,
+                        ::core::option::Option::None =>
+                            return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
+                    };
+                },
+            }
         }
     });
 
@@ -843,20 +904,31 @@ fn deserialize_enum_variant_arm(
         FieldsStyle::Unnamed if variant.fields.fields.len() == 1 => {
             let field = &variant.fields.fields[0];
             let ty = field.ty();
-            match field.mode() {
-                ItemMode::Stateful => quote! {
+            if field.attrs.with.is_some() {
+                let seed = with_deserialize_seed(field);
+                quote! {
                     (__Variant::#variant_ident, __variant) => {
-                        let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+                        let __seed = #seed;
                         let __value = _serde::de::VariantAccess::newtype_variant_seed(__variant, __seed)?;
                         ::core::result::Result::Ok(#ident::#variant_ident(__value))
                     }
-                },
-                ItemMode::Stateless => quote! {
-                    (__Variant::#variant_ident, __variant) => {
-                        let __value: #ty = _serde::de::VariantAccess::newtype_variant(__variant)?;
-                        ::core::result::Result::Ok(#ident::#variant_ident(__value))
-                    }
-                },
+                }
+            } else {
+                match field.mode() {
+                    ItemMode::Stateful => quote! {
+                        (__Variant::#variant_ident, __variant) => {
+                            let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+                            let __value = _serde::de::VariantAccess::newtype_variant_seed(__variant, __seed)?;
+                            ::core::result::Result::Ok(#ident::#variant_ident(__value))
+                        }
+                    },
+                    ItemMode::Stateless => quote! {
+                        (__Variant::#variant_ident, __variant) => {
+                            let __value: #ty = _serde::de::VariantAccess::newtype_variant(__variant)?;
+                            ::core::result::Result::Ok(#ident::#variant_ident(__value))
+                        }
+                    },
+                }
             }
         }
         FieldsStyle::Unnamed => {
@@ -933,24 +1005,36 @@ fn tuple_variant_visitor(
         let binding = &bindings[index];
         let ty = field.ty();
         let idx = index;
-        match field.mode() {
-            ItemMode::Stateful => quote! {
-                let #binding = match _serde::de::SeqAccess::next_element_seed(
-                    &mut __seq,
-                    _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state),
-                )? {
+        if field.attrs.with.is_some() {
+            let seed = with_deserialize_seed(field);
+            quote! {
+                let __seed = #seed;
+                let #binding = match _serde::de::SeqAccess::next_element_seed(&mut __seq, __seed)? {
                     ::core::option::Option::Some(value) => value,
                     ::core::option::Option::None =>
                         return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
                 };
-            },
-            ItemMode::Stateless => quote! {
-                let #binding = match _serde::de::SeqAccess::next_element::<#ty>(&mut __seq)? {
-                    ::core::option::Option::Some(value) => value,
-                    ::core::option::Option::None =>
-                        return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
-                };
-            },
+            }
+        } else {
+            match field.mode() {
+                ItemMode::Stateful => quote! {
+                    let #binding = match _serde::de::SeqAccess::next_element_seed(
+                        &mut __seq,
+                        _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state),
+                    )? {
+                        ::core::option::Option::Some(value) => value,
+                        ::core::option::Option::None =>
+                            return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
+                    };
+                },
+                ItemMode::Stateless => quote! {
+                    let #binding = match _serde::de::SeqAccess::next_element::<#ty>(&mut __seq)? {
+                        ::core::option::Option::Some(value) => value,
+                        ::core::option::Option::None =>
+                            return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
+                    };
+                },
+            }
         }
     });
     let construct = quote!(#ident::#variant_ident(#(#bindings),*));
@@ -1100,18 +1184,28 @@ fn struct_variant_helpers(
             let ident = field.ident().unwrap();
             let ty = field.ty();
             let field_name = field.attrs.key(ident);
-            let assignment = match field.mode() {
-                ItemMode::Stateful => quote! {
-                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+            let assignment = if field.attrs.with.is_some() {
+                let seed = with_deserialize_seed(field);
+                quote! {
+                    let __seed = #seed;
                     #ident = ::core::option::Option::Some(
                         _serde::de::MapAccess::next_value_seed(&mut __map, __seed)?,
                     );
-                },
-                ItemMode::Stateless => quote! {
-                    #ident = ::core::option::Option::Some(
-                        _serde::de::MapAccess::next_value::<#ty>(&mut __map)?,
-                    );
-                },
+                }
+            } else {
+                match field.mode() {
+                    ItemMode::Stateful => quote! {
+                        let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+                        #ident = ::core::option::Option::Some(
+                            _serde::de::MapAccess::next_value_seed(&mut __map, __seed)?,
+                        );
+                    },
+                    ItemMode::Stateless => quote! {
+                        #ident = ::core::option::Option::Some(
+                            _serde::de::MapAccess::next_value::<#ty>(&mut __map)?,
+                        );
+                    },
+                }
             };
             quote! {
                 #field_enum_ident::#variant => {
@@ -1205,6 +1299,40 @@ fn struct_variant_helpers(
     }
 }
 
+fn with_deserialize_seed(field: &FieldDecl<'_>) -> TokenStream {
+    let ty = field.ty();
+    let with = field
+        .attrs
+        .with
+        .as_ref()
+        .expect("with_deserialize_seed used without `with`");
+    quote! {
+        {
+            struct __SerdeStateWithSeed<'state, State: ?Sized> {
+                state: &'state State,
+            }
+
+            impl<'de, 'state, State: ?Sized> _serde::de::DeserializeSeed<'de>
+                for __SerdeStateWithSeed<'state, State>
+            {
+                type Value = #ty;
+
+                fn deserialize<__D>(
+                    self,
+                    __deserializer: __D,
+                ) -> ::core::result::Result<Self::Value, __D::Error>
+                where
+                    __D: _serde::Deserializer<'de>,
+                {
+                    #with::deserialize_state(self.state, __deserializer)
+                }
+            }
+
+            __SerdeStateWithSeed { state }
+        }
+    }
+}
+
 fn add_state_param(generics: &Generics, infer_state: bool) -> Generics {
     let mut generics = generics.clone();
     let lifetime: syn::LifetimeParam = parse_quote!('de);
@@ -1231,7 +1359,7 @@ fn collect_field_types_from_fields<'a>(fields: &'a FieldsDecl<'a>) -> Vec<FieldT
         .fields
         .iter()
         .filter_map(|field| {
-            if field.attrs.skip {
+            if field.attrs.skip || field.attrs.with.is_some() {
                 return None;
             }
             Some(FieldType::new(field.ty(), field.mode()))

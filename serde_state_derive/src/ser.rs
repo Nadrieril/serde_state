@@ -236,9 +236,30 @@ fn serialize_unit_struct(ident: &syn::Ident) -> TokenStream {
 }
 
 fn serialize_field_expr(field: &FieldDecl<'_>, value: TokenStream) -> TokenStream {
-    match field.mode() {
-        ItemMode::Stateful => quote!(&_serde_state::__private::wrap_serialize(#value, __state)),
-        ItemMode::Stateless => quote!(#value),
+    if let Some(with) = &field.attrs.with {
+        let ty = field.ty();
+        quote!(&{
+            struct __SerdeStateWith<'state, State: ?Sized> {
+                value: &'state #ty,
+                state: &'state State,
+            }
+
+            impl<'state, State: ?Sized> _serde::Serialize for __SerdeStateWith<'state, State> {
+                fn serialize<__S>(&self, __serializer: __S) -> Result<__S::Ok, __S::Error>
+                where
+                    __S: _serde::Serializer,
+                {
+                    #with::serialize_state(self.value, self.state, __serializer)
+                }
+            }
+
+            __SerdeStateWith { value: #value, state: __state }
+        })
+    } else {
+        match field.mode() {
+            ItemMode::Stateful => quote!(&_serde_state::__private::wrap_serialize(#value, __state)),
+            ItemMode::Stateless => quote!(#value),
+        }
     }
 }
 
@@ -389,7 +410,7 @@ impl<'a> FieldType<'a> {
 fn collect_field_types_from_fields<'a>(fields: &'a FieldsDecl<'a>) -> Vec<FieldType<'a>> {
     let mut result = Vec::new();
     for field in &fields.fields {
-        if field.attrs.skip {
+        if field.attrs.skip || field.attrs.with.is_some() {
             continue;
         }
         result.push(FieldType::new(field.ty(), field.mode()));
