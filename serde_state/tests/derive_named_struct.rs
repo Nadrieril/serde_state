@@ -83,6 +83,7 @@ struct Empty;
 
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 struct PlainNumbers {
+    #[serde_state(stateless)]
     value: u32,
 }
 

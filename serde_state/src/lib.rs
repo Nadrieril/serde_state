@@ -15,7 +15,7 @@ pub trait DeserializeState<'de, State: ?Sized>: Sized {
         D: serde::Deserializer<'de>;
 }
 
-impl<State: ?Sized, T: SerializeState<State> + ?Sized> SerializeState<State> for Box<T> {
+impl<State: ?Sized, T: SerializeState<State> + ?Sized> SerializeState<State> for &'_ T {
     fn serialize_state<S>(&self, state: &State, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -24,6 +24,14 @@ impl<State: ?Sized, T: SerializeState<State> + ?Sized> SerializeState<State> for
     }
 }
 
+impl<State: ?Sized, T: SerializeState<State> + ?Sized> SerializeState<State> for Box<T> {
+    fn serialize_state<S>(&self, state: &State, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        T::serialize_state(&**self, state, serializer)
+    }
+}
 impl<'de, State: ?Sized, T> DeserializeState<'de, State> for Box<T>
 where
     T: DeserializeState<'de, State>,
@@ -36,44 +44,6 @@ where
     }
 }
 
-impl<State: ?Sized> SerializeState<State> for u32 {
-    fn serialize_state<S>(&self, _state: &State, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u32(*self)
-    }
-}
-
-impl<'de, State: ?Sized> DeserializeState<'de, State> for u32 {
-    fn deserialize_state<D>(_state: &State, deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::Deserialize;
-        u32::deserialize(deserializer)
-    }
-}
-
-impl<State: ?Sized> SerializeState<State> for usize {
-    fn serialize_state<S>(&self, _state: &State, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u64(*self as u64)
-    }
-}
-
-impl<'de, State: ?Sized> DeserializeState<'de, State> for usize {
-    fn deserialize_state<D>(_state: &State, deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::Deserialize;
-        Ok(u32::deserialize(deserializer)? as usize)
-    }
-}
-
 impl<State: ?Sized, T> SerializeState<State> for PhantomData<T> {
     fn serialize_state<S>(&self, _state: &State, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -82,7 +52,6 @@ impl<State: ?Sized, T> SerializeState<State> for PhantomData<T> {
         serializer.serialize_unit_struct("PhantomData")
     }
 }
-
 impl<'de, State: ?Sized, T> DeserializeState<'de, State> for PhantomData<T> {
     fn deserialize_state<D>(_state: &State, deserializer: D) -> Result<Self, D::Error>
     where
