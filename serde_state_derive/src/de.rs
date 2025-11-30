@@ -7,6 +7,16 @@ use syn::{
     FieldsUnnamed, GenericParam, Generics, Type,
 };
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ItemMode {
+    Stateful,
+    Stateless,
+}
+
+fn merge_modes(default: ItemMode, override_mode: Option<ItemMode>) -> ItemMode {
+    override_mode.unwrap_or(default)
+}
+
 pub fn expand_derive_deserialize(input: &DeriveInput) -> syn::Result<TokenStream> {
     let attrs = ContainerAttributes::from_attrs(&input.attrs)?;
     let impl_block = match &input.data {
@@ -36,17 +46,22 @@ fn derive_struct(
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = input.generics.where_clause.clone();
     let state_tokens = state_type_tokens(attrs.state.as_ref());
-    let field_types = collect_field_types_from_fields(&data.fields);
+    let field_types = collect_field_types_from_fields(&data.fields, attrs.mode);
     if infer_state {
         add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     } else {
-        add_deserialize_bounds_from_type_params(&mut where_clause, &input.generics, &state_tokens);
+        add_deserialize_bounds_from_type_params(
+            &mut where_clause,
+            &input.generics,
+            &state_tokens,
+            attrs.mode,
+        );
     }
     let where_clause_tokens = quote_where_clause(&where_clause);
     let ident = &input.ident;
 
     let body = if attrs.transparent {
-        deserialize_transparent(ident, &data.fields, &state_tokens)?
+        deserialize_transparent(ident, &data.fields, &state_tokens, attrs.mode)?
     } else {
         deserialize_struct_body(
             ident,
@@ -55,6 +70,7 @@ fn derive_struct(
             &input.generics,
             infer_state,
             &where_clause,
+            attrs.mode,
         )
     };
 
@@ -87,11 +103,16 @@ fn derive_enum(
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = input.generics.where_clause.clone();
     let state_tokens = state_type_tokens(attrs.state.as_ref());
-    let field_types = collect_field_types_from_enum(data);
+    let field_types = collect_field_types_from_enum(data, attrs.mode);
     if infer_state {
         add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     } else {
-        add_deserialize_bounds_from_type_params(&mut where_clause, &input.generics, &state_tokens);
+        add_deserialize_bounds_from_type_params(
+            &mut where_clause,
+            &input.generics,
+            &state_tokens,
+            attrs.mode,
+        );
     }
     let where_clause_tokens = quote_where_clause(&where_clause);
     let ident = &input.ident;
@@ -103,6 +124,7 @@ fn derive_enum(
         &input.generics,
         infer_state,
         &where_clause,
+        attrs.mode,
     );
 
     Ok(quote! {
@@ -125,24 +147,38 @@ fn deserialize_transparent(
     ident: &syn::Ident,
     fields: &Fields,
     state_tokens: &TokenStream,
+    mode: ItemMode,
 ) -> syn::Result<TokenStream> {
     match fields {
         Fields::Named(named) if named.named.len() == 1 => {
             let field = named.named.first().unwrap();
             let field_ident = field.ident.as_ref().unwrap();
             let ty = &field.ty;
-            Ok(quote! {
-                let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
-                let #field_ident = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
-                ::core::result::Result::Ok(#ident { #field_ident: #field_ident })
+            Ok(match merge_modes(mode, field_mode(&field.attrs)) {
+                ItemMode::Stateful => quote! {
+                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
+                    let #field_ident = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+                    ::core::result::Result::Ok(#ident { #field_ident: #field_ident })
+                },
+                ItemMode::Stateless => quote! {
+                    let #field_ident: #ty = _serde::Deserialize::deserialize(__deserializer)?;
+                    ::core::result::Result::Ok(#ident { #field_ident: #field_ident })
+                },
             })
         }
         Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => {
-            let ty = &unnamed.unnamed.first().unwrap().ty;
-            Ok(quote! {
-                let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
-                let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
-                ::core::result::Result::Ok(#ident(__value))
+            let field = unnamed.unnamed.first().unwrap();
+            let ty = &field.ty;
+            Ok(match merge_modes(mode, field_mode(&field.attrs)) {
+                ItemMode::Stateful => quote! {
+                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(__state);
+                    let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+                    ::core::result::Result::Ok(#ident(__value))
+                },
+                ItemMode::Stateless => quote! {
+                    let __value: #ty = _serde::Deserialize::deserialize(__deserializer)?;
+                    ::core::result::Result::Ok(#ident(__value))
+                },
             })
         }
         other => Err(syn::Error::new(
@@ -159,6 +195,7 @@ fn deserialize_struct_body(
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
+    mode: ItemMode,
 ) -> TokenStream {
     match fields {
         Fields::Named(named) => deserialize_named_struct(
@@ -168,6 +205,7 @@ fn deserialize_struct_body(
             generics,
             infer_state,
             where_clause,
+            mode,
         ),
         Fields::Unnamed(unnamed) => deserialize_unnamed_struct(
             ident,
@@ -176,6 +214,7 @@ fn deserialize_struct_body(
             generics,
             infer_state,
             where_clause,
+            mode,
         ),
         Fields::Unit => deserialize_unit_struct(ident),
     }
@@ -188,6 +227,7 @@ fn deserialize_named_struct(
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
+    mode: ItemMode,
 ) -> TokenStream {
     let field_names: Vec<String> = fields
         .named
@@ -266,15 +306,25 @@ fn deserialize_named_struct(
             let ident = field.ident.as_ref().unwrap();
             let name = ident.to_string();
             let ty = &field.ty;
+            let assignment = match merge_modes(mode, field_mode(&field.attrs)) {
+                ItemMode::Stateful => quote! {
+                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+                    #ident = ::core::option::Option::Some(
+                        _serde::de::MapAccess::next_value_seed(&mut __map, __seed)?,
+                    );
+                },
+                ItemMode::Stateless => quote! {
+                    #ident = ::core::option::Option::Some(
+                        _serde::de::MapAccess::next_value::<#ty>(&mut __map)?,
+                    );
+                },
+            };
             quote! {
                 __Field::#variant => {
                     if #ident.is_some() {
                         return ::core::result::Result::Err(_serde::de::Error::duplicate_field(#name));
                     }
-                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
-                    #ident = ::core::option::Option::Some(
-                        _serde::de::MapAccess::next_value_seed(&mut __map, __seed)?,
-                    );
+                    #assignment
                 }
             }
         });
@@ -372,12 +422,21 @@ fn deserialize_unnamed_struct(
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
+    mode: ItemMode,
 ) -> TokenStream {
     match fields.unnamed.len() {
         0 => deserialize_unit_struct(ident),
         1 => {
-            let ty = &fields.unnamed.first().unwrap().ty;
-            deserialize_newtype_struct(ident, ty, state_tokens, generics, infer_state, where_clause)
+            let field = fields.unnamed.first().unwrap();
+            deserialize_newtype_struct(
+                ident,
+                field,
+                state_tokens,
+                generics,
+                infer_state,
+                where_clause,
+                mode,
+            )
         }
         _ => deserialize_tuple_struct(
             ident,
@@ -386,23 +445,67 @@ fn deserialize_unnamed_struct(
             generics,
             infer_state,
             where_clause,
+            mode,
         ),
     }
 }
 
 fn deserialize_newtype_struct(
     ident: &syn::Ident,
-    field_ty: &Type,
+    field: &syn::Field,
     state_tokens: &TokenStream,
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
+    mode: ItemMode,
 ) -> TokenStream {
+    let field_ty = &field.ty;
     let (visitor_struct_generics, _) = visitor_struct_generics_tokens(generics, infer_state);
     let (visitor_impl_generics, visitor_impl_type_generics) =
         visitor_impl_generics_tokens(generics, infer_state);
     let (_, ty_generics, _) = generics.split_for_impl();
     let phantom_type = phantom_type(ident, generics);
+    let field_mode = merge_modes(mode, field_mode(&field.attrs));
+
+    let newtype_body = match field_mode {
+        ItemMode::Stateful => quote! {
+            let state = self.state;
+            let __seed = _serde_state::__private::wrap_deserialize_seed::<#field_ty, #state_tokens>(state);
+            let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
+            ::core::result::Result::Ok(#ident(__value))
+        },
+        ItemMode::Stateless => quote! {
+            let __value: #field_ty = _serde::Deserialize::deserialize(__deserializer)?;
+            ::core::result::Result::Ok(#ident(__value))
+        },
+    };
+
+    let seq_body = match field_mode {
+        ItemMode::Stateful => quote! {
+            let state = self.state;
+            let __seed = _serde_state::__private::wrap_deserialize_seed::<#field_ty, #state_tokens>(state);
+            let __value = match _serde::de::SeqAccess::next_element_seed(&mut __seq, __seed)? {
+                ::core::option::Option::Some(value) => value,
+                ::core::option::Option::None =>
+                    return ::core::result::Result::Err(_serde::de::Error::invalid_length(0, &self)),
+            };
+            if _serde::de::SeqAccess::next_element::<_serde::de::IgnoredAny>(&mut __seq)?.is_some() {
+                return ::core::result::Result::Err(_serde::de::Error::invalid_length(1, &self));
+            }
+            ::core::result::Result::Ok(#ident(__value))
+        },
+        ItemMode::Stateless => quote! {
+            let __value = match _serde::de::SeqAccess::next_element::<#field_ty>(&mut __seq)? {
+                ::core::option::Option::Some(value) => value,
+                ::core::option::Option::None =>
+                    return ::core::result::Result::Err(_serde::de::Error::invalid_length(0, &self)),
+            };
+            if _serde::de::SeqAccess::next_element::<_serde::de::IgnoredAny>(&mut __seq)?.is_some() {
+                return ::core::result::Result::Err(_serde::de::Error::invalid_length(1, &self));
+            }
+            ::core::result::Result::Ok(#ident(__value))
+        },
+    };
 
     let visitor_struct = quote! {
         struct __Visitor #visitor_struct_generics {
@@ -419,10 +522,7 @@ fn deserialize_newtype_struct(
         where
             __E: _serde::Deserializer<'de>,
         {
-            let state = self.state;
-            let __seed = _serde_state::__private::wrap_deserialize_seed::<#field_ty, #state_tokens>(state);
-            let __value = _serde::de::DeserializeSeed::deserialize(__seed, __deserializer)?;
-            ::core::result::Result::Ok(#ident(__value))
+            #newtype_body
         }
 
         fn visit_seq<__A>(
@@ -432,17 +532,7 @@ fn deserialize_newtype_struct(
         where
             __A: _serde::de::SeqAccess<'de>,
         {
-            let state = self.state;
-            let __seed = _serde_state::__private::wrap_deserialize_seed::<#field_ty, #state_tokens>(state);
-            let __value = match _serde::de::SeqAccess::next_element_seed(&mut __seq, __seed)? {
-                ::core::option::Option::Some(value) => value,
-                ::core::option::Option::None =>
-                    return ::core::result::Result::Err(_serde::de::Error::invalid_length(0, &self)),
-            };
-            if _serde::de::SeqAccess::next_element::<_serde::de::IgnoredAny>(&mut __seq)?.is_some() {
-                return ::core::result::Result::Err(_serde::de::Error::invalid_length(1, &self));
-            }
-            ::core::result::Result::Ok(#ident(__value))
+            #seq_body
         }
     };
 
@@ -482,6 +572,7 @@ fn deserialize_tuple_struct(
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
+    mode: ItemMode,
 ) -> TokenStream {
     let len = fields.unnamed.len();
     let bindings: Vec<_> = (0..len).map(|i| format_ident!("__field_{}", i)).collect();
@@ -489,15 +580,24 @@ fn deserialize_tuple_struct(
         let binding = &bindings[index];
         let ty = &field.ty;
         let idx = index;
-        quote! {
-            let #binding = match _serde::de::SeqAccess::next_element_seed(
-                &mut __seq,
-                _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state),
-            )? {
-                ::core::option::Option::Some(value) => value,
-                ::core::option::Option::None =>
-                    return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
-            };
+        match merge_modes(mode, field_mode(&field.attrs)) {
+            ItemMode::Stateful => quote! {
+                let #binding = match _serde::de::SeqAccess::next_element_seed(
+                    &mut __seq,
+                    _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state),
+                )? {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None =>
+                        return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
+                };
+            },
+            ItemMode::Stateless => quote! {
+                let #binding = match _serde::de::SeqAccess::next_element::<#ty>(&mut __seq)? {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None =>
+                        return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
+                };
+            },
         }
     });
 
@@ -593,6 +693,7 @@ fn deserialize_enum_body(
     generics: &Generics,
     infer_state: bool,
     where_clause: &Option<syn::WhereClause>,
+    mode: ItemMode,
 ) -> TokenStream {
     let variant_names: Vec<_> = data
         .variants
@@ -661,6 +762,7 @@ fn deserialize_enum_body(
             variant,
             state_tokens,
             generics,
+            mode,
             infer_state,
             index,
             &mut helper_tokens,
@@ -731,12 +833,14 @@ fn deserialize_enum_variant_arm(
     variant: &syn::Variant,
     state_tokens: &TokenStream,
     generics: &Generics,
+    mode: ItemMode,
     infer_state: bool,
     index: usize,
     helpers: &mut Vec<TokenStream>,
     where_clause: &Option<syn::WhereClause>,
 ) -> TokenStream {
     let variant_ident = &variant.ident;
+    let variant_mode = merge_modes(mode, attrs_mode(&variant.attrs));
     match &variant.fields {
         Fields::Unit => {
             quote! {
@@ -747,13 +851,23 @@ fn deserialize_enum_variant_arm(
             }
         }
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
-            let ty = &fields.unnamed.first().unwrap().ty;
-            quote! {
-                (__Variant::#variant_ident, __variant) => {
-                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
-                    let __value = _serde::de::VariantAccess::newtype_variant_seed(__variant, __seed)?;
-                    ::core::result::Result::Ok(#ident::#variant_ident(__value))
-                }
+            let field = fields.unnamed.first().unwrap();
+            let ty = &field.ty;
+            let field_mode = merge_modes(variant_mode, field_mode(&field.attrs));
+            match field_mode {
+                ItemMode::Stateful => quote! {
+                    (__Variant::#variant_ident, __variant) => {
+                        let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+                        let __value = _serde::de::VariantAccess::newtype_variant_seed(__variant, __seed)?;
+                        ::core::result::Result::Ok(#ident::#variant_ident(__value))
+                    }
+                },
+                ItemMode::Stateless => quote! {
+                    (__Variant::#variant_ident, __variant) => {
+                        let __value: #ty = _serde::de::VariantAccess::newtype_variant(__variant)?;
+                        ::core::result::Result::Ok(#ident::#variant_ident(__value))
+                    }
+                },
             }
         }
         Fields::Unnamed(fields) => {
@@ -764,6 +878,7 @@ fn deserialize_enum_variant_arm(
                 fields,
                 state_tokens,
                 generics,
+                variant_mode,
                 infer_state,
                 &visitor_ident,
                 where_clause,
@@ -791,6 +906,7 @@ fn deserialize_enum_variant_arm(
                 fields,
                 state_tokens,
                 generics,
+                variant_mode,
                 infer_state,
                 &visitor_ident,
                 &field_array_ident,
@@ -818,6 +934,7 @@ fn tuple_variant_visitor(
     fields: &FieldsUnnamed,
     state_tokens: &TokenStream,
     generics: &Generics,
+    mode: ItemMode,
     infer_state: bool,
     visitor_ident: &syn::Ident,
     where_clause: &Option<syn::WhereClause>,
@@ -830,15 +947,24 @@ fn tuple_variant_visitor(
         let binding = &bindings[index];
         let ty = &field.ty;
         let idx = index;
-        quote! {
-            let #binding = match _serde::de::SeqAccess::next_element_seed(
-                &mut __seq,
-                _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state),
-            )? {
-                ::core::option::Option::Some(value) => value,
-                ::core::option::Option::None =>
-                    return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
-            };
+        match merge_modes(mode, field_mode(&field.attrs)) {
+            ItemMode::Stateful => quote! {
+                let #binding = match _serde::de::SeqAccess::next_element_seed(
+                    &mut __seq,
+                    _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state),
+                )? {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None =>
+                        return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
+                };
+            },
+            ItemMode::Stateless => quote! {
+                let #binding = match _serde::de::SeqAccess::next_element::<#ty>(&mut __seq)? {
+                    ::core::option::Option::Some(value) => value,
+                    ::core::option::Option::None =>
+                        return ::core::result::Result::Err(_serde::de::Error::invalid_length(#idx, &self)),
+                };
+            },
         }
     });
     let construct = quote!(#ident::#variant_ident(#(#bindings),*));
@@ -897,6 +1023,7 @@ fn struct_variant_helpers(
     fields: &FieldsNamed,
     state_tokens: &TokenStream,
     generics: &Generics,
+    mode: ItemMode,
     infer_state: bool,
     visitor_ident: &syn::Ident,
     field_array_ident: &syn::Ident,
@@ -985,15 +1112,25 @@ fn struct_variant_helpers(
             let ident = field.ident.as_ref().unwrap();
             let ty = &field.ty;
             let name = ident.to_string();
+            let assignment = match merge_modes(mode, field_mode(&field.attrs)) {
+                ItemMode::Stateful => quote! {
+                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
+                    #ident = ::core::option::Option::Some(
+                        _serde::de::MapAccess::next_value_seed(&mut __map, __seed)?,
+                    );
+                },
+                ItemMode::Stateless => quote! {
+                    #ident = ::core::option::Option::Some(
+                        _serde::de::MapAccess::next_value::<#ty>(&mut __map)?,
+                    );
+                },
+            };
             quote! {
                 #field_enum_ident::#variant => {
                     if #ident.is_some() {
                         return ::core::result::Result::Err(_serde::de::Error::duplicate_field(#name));
                     }
-                    let __seed = _serde_state::__private::wrap_deserialize_seed::<#ty, #state_tokens>(state);
-                    #ident = ::core::option::Option::Some(
-                        _serde::de::MapAccess::next_value_seed(&mut __map, __seed)?,
-                    );
+                    #assignment
                 }
             }
         });
@@ -1083,25 +1220,64 @@ fn add_state_param(generics: &Generics, infer_state: bool) -> Generics {
     generics
 }
 
-fn collect_field_types_from_fields<'a>(fields: &'a Fields) -> Vec<&'a Type> {
+struct FieldType<'a> {
+    ty: &'a Type,
+    mode: ItemMode,
+}
+
+impl<'a> FieldType<'a> {
+    fn new(ty: &'a Type, mode: ItemMode) -> Self {
+        FieldType { ty, mode }
+    }
+}
+
+fn collect_field_types_from_fields<'a>(
+    fields: &'a Fields,
+    default_mode: ItemMode,
+) -> Vec<FieldType<'a>> {
     match fields {
-        Fields::Named(named) => named.named.iter().map(|field| &field.ty).collect(),
-        Fields::Unnamed(unnamed) => unnamed.unnamed.iter().map(|field| &field.ty).collect(),
+        Fields::Named(named) => named
+            .named
+            .iter()
+            .map(|field| {
+                FieldType::new(
+                    &field.ty,
+                    merge_modes(default_mode, field_mode(&field.attrs)),
+                )
+            })
+            .collect(),
+        Fields::Unnamed(unnamed) => unnamed
+            .unnamed
+            .iter()
+            .map(|field| {
+                FieldType::new(
+                    &field.ty,
+                    merge_modes(default_mode, field_mode(&field.attrs)),
+                )
+            })
+            .collect(),
         Fields::Unit => Vec::new(),
     }
 }
 
-fn collect_field_types_from_enum<'a>(data: &'a DataEnum) -> Vec<&'a Type> {
+fn collect_field_types_from_enum<'a>(
+    data: &'a DataEnum,
+    default_mode: ItemMode,
+) -> Vec<FieldType<'a>> {
     let mut result = Vec::new();
     for variant in &data.variants {
-        result.extend(collect_field_types_from_fields(&variant.fields));
+        let variant_mode = merge_modes(default_mode, attrs_mode(&variant.attrs));
+        result.extend(collect_field_types_from_fields(
+            &variant.fields,
+            variant_mode,
+        ));
     }
     result
 }
 
 fn add_deserialize_bounds_from_types(
     where_clause: &mut Option<syn::WhereClause>,
-    field_types: &[&Type],
+    field_types: &[FieldType<'_>],
     state_ty: &TokenStream,
 ) {
     if field_types.is_empty() {
@@ -1113,10 +1289,16 @@ fn add_deserialize_bounds_from_types(
         predicates: Default::default(),
     });
 
-    for ty in field_types {
-        clause
-            .predicates
-            .push(parse_quote!(#ty: _serde_state::DeserializeState<'de, #state_ty>));
+    for field in field_types {
+        let ty = field.ty;
+        match field.mode {
+            ItemMode::Stateful => clause
+                .predicates
+                .push(parse_quote!(#ty: _serde_state::DeserializeState<'de, #state_ty>)),
+            ItemMode::Stateless => clause
+                .predicates
+                .push(parse_quote!(#ty: _serde::Deserialize<'de>)),
+        }
     }
 }
 
@@ -1124,6 +1306,7 @@ fn add_deserialize_bounds_from_type_params(
     where_clause: &mut Option<syn::WhereClause>,
     generics: &Generics,
     state_ty: &TokenStream,
+    mode: ItemMode,
 ) {
     let type_params: Vec<_> = generics
         .type_params()
@@ -1139,9 +1322,14 @@ fn add_deserialize_bounds_from_type_params(
     });
 
     for ident in type_params {
-        clause
-            .predicates
-            .push(parse_quote!(#ident: _serde_state::DeserializeState<'de, #state_ty>));
+        match mode {
+            ItemMode::Stateful => clause
+                .predicates
+                .push(parse_quote!(#ident: _serde_state::DeserializeState<'de, #state_ty>)),
+            ItemMode::Stateless => clause
+                .predicates
+                .push(parse_quote!(#ident: _serde::Deserialize<'de>)),
+        }
     }
 }
 
@@ -1198,10 +1386,35 @@ fn phantom_type(ident: &syn::Ident, generics: &Generics) -> TokenStream {
     quote!(#ident #ty_generics)
 }
 
+fn field_mode(attrs: &[Attribute]) -> Option<ItemMode> {
+    attrs_mode(attrs)
+}
+
+fn attrs_mode(attrs: &[Attribute]) -> Option<ItemMode> {
+    let mut mode = None;
+    for attr in attrs {
+        if attr.path().is_ident("serde_state") {
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("stateless") {
+                    mode = Some(ItemMode::Stateless);
+                    return Ok(());
+                }
+                if meta.path.is_ident("stateful") {
+                    mode = Some(ItemMode::Stateful);
+                    return Ok(());
+                }
+                Ok(())
+            });
+        }
+    }
+    mode
+}
+
 struct ContainerAttributes {
     transparent: bool,
     serde_path: Option<syn::Path>,
     state: Option<Type>,
+    mode: ItemMode,
 }
 
 impl ContainerAttributes {
@@ -1210,6 +1423,7 @@ impl ContainerAttributes {
             transparent: false,
             serde_path: None,
             state: None,
+            mode: ItemMode::Stateful,
         };
 
         for attr in attrs {
@@ -1239,6 +1453,20 @@ impl ContainerAttributes {
                     }
                     let ty = meta.value()?.parse()?;
                     result.state = Some(ty);
+                    return Ok(());
+                }
+                if meta.path.is_ident("stateless") {
+                    if !is_serde_state {
+                        return Err(meta.error("`stateless` must be specified with `serde_state`"));
+                    }
+                    result.mode = ItemMode::Stateless;
+                    return Ok(());
+                }
+                if meta.path.is_ident("stateful") {
+                    if !is_serde_state {
+                        return Err(meta.error("`stateful` must be specified with `serde_state`"));
+                    }
+                    result.mode = ItemMode::Stateful;
                     return Ok(());
                 }
                 if is_serde_state {

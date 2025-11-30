@@ -59,6 +59,33 @@ let mut buffer = Vec::new();
 assert_eq!(state.serialized.get(), 2);
 ```
 
+### Stateless or stateful overrides
+
+By default every type derived with `SerializeState`/`DeserializeState` is stateful, meaning
+every field is serialized through the stateful traits. You can opt out by using
+`#[serde_state(stateless)]` on the container, on a specific enum variant, or on individual
+fields. The attribute can also be flipped back with `#[serde_state(stateful)]` when you want to
+override a stateless container.
+
+```rust
+#[derive(SerializeState, DeserializeState)]
+struct Mixed {
+    #[serde_state(stateless)]
+    plain: u32,
+    counter: CounterValue,
+}
+
+#[derive(SerializeState, DeserializeState)]
+enum VariantModes {
+    #[serde_state(stateless)]
+    Plain(u32),
+    #[serde_state(stateless)]
+    Struct { value: u32 },
+    #[serde_state(stateless)]
+    WithOverride { #[serde_state(stateful)] counter: CounterValue },
+}
+```
+
 ### Recursive structures
 
 Because this uses perfect derives, the derive macro causes trait errors on recursive types. To solve

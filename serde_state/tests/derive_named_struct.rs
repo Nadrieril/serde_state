@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_state::{DeserializeState, SerializeState};
 use std::{cell::Cell, marker::PhantomData};
@@ -11,6 +11,9 @@ struct Recorder {
 
 #[derive(Clone, Debug, PartialEq)]
 struct CounterValue(u32);
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+struct PlainValue(u32);
 
 impl SerializeState<Recorder> for CounterValue {
     fn serialize_state<S>(&self, recorder: &Recorder, serializer: S) -> Result<S::Ok, S::Error>
@@ -54,6 +57,38 @@ struct Empty;
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 struct PlainNumbers {
     value: u32,
+}
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+struct MixedModes {
+    #[serde_state(stateless)]
+    plain: PlainValue,
+    stateful: CounterValue,
+}
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(stateless)]
+struct StatelessContainerWithOverride {
+    plain: PlainValue,
+    #[serde_state(stateful)]
+    counter: CounterValue,
+}
+
+#[derive(Clone, SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(stateful)]
+enum VariantModes {
+    #[serde_state(stateless)]
+    Plain(PlainValue),
+    #[serde_state(stateless)]
+    Struct {
+        value: PlainValue,
+    },
+    Stateful(CounterValue),
+    #[serde_state(stateless)]
+    WithOverride {
+        #[serde_state(stateful)]
+        counter: CounterValue,
+    },
 }
 
 #[derive(Clone, SerializeState, DeserializeState, Debug, PartialEq)]
@@ -281,6 +316,86 @@ fn generic_struct_threads_state() {
     let decoded = GenericContainer::deserialize_state(&state, &mut deserializer).unwrap();
     assert_eq!(decoded, value);
     assert_eq!(state.deserialized.get(), 2);
+}
+
+#[test]
+fn stateless_fields_use_plain_serde() {
+    let value = MixedModes {
+        plain: PlainValue(7),
+        stateful: CounterValue(8),
+    };
+
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        value
+            .serialize_state(&state, &mut serializer)
+            .expect("mixed serialization");
+    }
+    assert_eq!(state.serialized.get(), 1);
+
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = MixedModes::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded, value);
+    assert_eq!(state.deserialized.get(), 1);
+
+    let value = StatelessContainerWithOverride {
+        plain: PlainValue(9),
+        counter: CounterValue(10),
+    };
+
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        value
+            .serialize_state(&state, &mut serializer)
+            .expect("stateless container serialization");
+    }
+    assert_eq!(state.serialized.get(), 1);
+
+    let state = Recorder::default();
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded =
+        StatelessContainerWithOverride::deserialize_state(&state, &mut deserializer).unwrap();
+    assert_eq!(decoded, value);
+    assert_eq!(state.deserialized.get(), 1);
+}
+
+#[test]
+fn stateless_variants_control_state_usage() {
+    fn round_trip(value: VariantModes) -> usize {
+        let state = Recorder::default();
+        let mut buffer = Vec::new();
+        {
+            let mut serializer = serde_json::Serializer::new(&mut buffer);
+            value
+                .serialize_state(&state, &mut serializer)
+                .expect("variant serialization");
+        }
+        let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+        let de_state = Recorder::default();
+        let decoded = VariantModes::deserialize_state(&de_state, &mut deserializer).unwrap();
+        assert_eq!(decoded, value);
+        state.serialized.get()
+    }
+
+    assert_eq!(round_trip(VariantModes::Plain(PlainValue(1))), 0);
+    assert_eq!(
+        round_trip(VariantModes::Struct {
+            value: PlainValue(2)
+        }),
+        0
+    );
+    assert_eq!(round_trip(VariantModes::Stateful(CounterValue(3))), 1);
+    assert_eq!(
+        round_trip(VariantModes::WithOverride {
+            counter: CounterValue(4),
+        }),
+        1
+    );
 }
 
 #[test]
