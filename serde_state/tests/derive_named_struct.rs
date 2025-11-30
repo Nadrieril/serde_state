@@ -253,3 +253,55 @@ fn perfect_derive_does_not_require_generic_bounds() {
     assert_eq!(decoded, wrapper);
     assert_eq!(de_state.deserialized.get(), 0);
 }
+
+#[test]
+fn recursive_enum_threads_state() {
+    #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+    enum CounterListNode {
+        Nil,
+        Cons(CounterValue, Box<CounterList>),
+    }
+    #[derive(Debug, PartialEq)]
+    struct CounterList(CounterListNode);
+
+    // Manual impl to break the corecursive loop.
+    impl<State: ?Sized> serde_state::SerializeState<State> for CounterList
+    where
+        CounterValue: serde_state::SerializeState<State>,
+    {
+        fn serialize_state<S>(
+            &self,
+            state: &State,
+            serializer: S,
+        ) -> ::core::result::Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            self.0.serialize_state(state, serializer)
+        }
+    }
+
+    let list = CounterList(CounterListNode::Cons(
+        CounterValue(1),
+        Box::new(CounterList(CounterListNode::Cons(
+            CounterValue(2),
+            Box::new(CounterList(CounterListNode::Nil)),
+        ))),
+    ));
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        list.serialize_state(&state, &mut serializer)
+            .expect("recursive serialization");
+    }
+    // assert_eq!(state.serialized.get(), 2);
+    // let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    // assert_eq!(json_value, json!({"Cons": [1, {"Cons": [2, "Nil"]}]}));
+
+    // let state = Recorder::default();
+    // let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    // let decoded = CounterList::deserialize_state(&state, &mut deserializer).unwrap();
+    // assert_eq!(decoded, list);
+    // assert_eq!(state.deserialized.get(), 2);
+}
