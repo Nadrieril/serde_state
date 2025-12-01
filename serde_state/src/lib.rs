@@ -176,6 +176,16 @@ pub mod __private {
         _marker: core::marker::PhantomData<T>,
     }
 
+    impl<T, State: ?Sized> Copy for DeserializeStateSeed<'_, T, State> {}
+    impl<T, State: ?Sized> Clone for DeserializeStateSeed<'_, T, State> {
+        fn clone(&self) -> Self {
+            Self {
+                state: self.state,
+                _marker: self._marker,
+            }
+        }
+    }
+
     impl<'state, T, State: ?Sized> DeserializeStateSeed<'state, T, State> {
         pub fn new(state: &'state State) -> Self {
             Self {
