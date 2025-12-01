@@ -47,6 +47,7 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
     let mut where_clause = decl.generics.where_clause.clone();
     let state_tokens = state_type_tokens(decl);
     let field_types = collect_field_types_from_fields(&data.fields);
+    let explicit_state = decl.attrs.state.as_ref();
     if infer_bounds {
         add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     } else {
@@ -68,6 +69,7 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
             ident,
             &data.fields,
             &state_tokens,
+            explicit_state,
             decl.generics,
             uses_generic_state,
             decl.attrs.state_bound.as_ref(),
@@ -111,6 +113,7 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
     let mut where_clause = decl.generics.where_clause.clone();
     let state_tokens = state_type_tokens(decl);
     let field_types = collect_field_types_from_enum(data);
+    let explicit_state = decl.attrs.state.as_ref();
     if infer_bounds {
         add_deserialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
     } else {
@@ -131,6 +134,7 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
         ident,
         data,
         &state_tokens,
+        explicit_state,
         decl.generics,
         uses_generic_state,
         decl.attrs.state_bound.as_ref(),
@@ -218,6 +222,7 @@ fn deserialize_struct_body(
     ident: &syn::Ident,
     fields: &FieldsDecl<'_>,
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -228,6 +233,7 @@ fn deserialize_struct_body(
             ident,
             &fields.fields,
             state_tokens,
+            explicit_state,
             generics,
             include_state_param,
             state_bound,
@@ -237,6 +243,7 @@ fn deserialize_struct_body(
             ident,
             &fields.fields,
             state_tokens,
+            explicit_state,
             generics,
             include_state_param,
             state_bound,
@@ -250,6 +257,7 @@ fn deserialize_named_struct(
     ident: &syn::Ident,
     fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -340,7 +348,7 @@ fn deserialize_named_struct(
             let name = field.attrs.key(ident);
             let ty = field.ty();
             let assignment = if field.attrs.with.is_some() {
-                let seed = with_deserialize_seed(field);
+                let seed = with_deserialize_seed(field, explicit_state, state_bound);
                 quote! {
                     let __seed = #seed;
                     #ident = ::core::option::Option::Some(
@@ -469,6 +477,7 @@ fn deserialize_unnamed_struct(
     ident: &syn::Ident,
     fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -482,6 +491,7 @@ fn deserialize_unnamed_struct(
                 ident,
                 field,
                 state_tokens,
+                explicit_state,
                 generics,
                 include_state_param,
                 state_bound,
@@ -492,6 +502,7 @@ fn deserialize_unnamed_struct(
             ident,
             fields,
             state_tokens,
+            explicit_state,
             generics,
             include_state_param,
             state_bound,
@@ -504,6 +515,7 @@ fn deserialize_newtype_struct(
     ident: &syn::Ident,
     field: &FieldDecl<'_>,
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -540,7 +552,7 @@ fn deserialize_newtype_struct(
     };
 
     let seq_body = if field.attrs.with.is_some() {
-        let seed = with_deserialize_seed(field);
+        let seed = with_deserialize_seed(field, explicit_state, state_bound);
         quote! {
             let state = self.state;
             let __seed = #seed;
@@ -645,6 +657,7 @@ fn deserialize_tuple_struct(
     ident: &syn::Ident,
     fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -657,7 +670,7 @@ fn deserialize_tuple_struct(
         let ty = field.ty();
         let idx = index;
         if field.attrs.with.is_some() {
-            let seed = with_deserialize_seed(field);
+            let seed = with_deserialize_seed(field, explicit_state, state_bound);
             quote! {
                 let __seed = #seed;
                 let #binding = match _serde::de::SeqAccess::next_element_seed(&mut __seq, __seed)? {
@@ -779,6 +792,7 @@ fn deserialize_enum_body(
     ident: &syn::Ident,
     data: &EnumDecl<'_>,
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -850,6 +864,7 @@ fn deserialize_enum_body(
             ident,
             variant,
             state_tokens,
+            explicit_state,
             generics,
             include_state_param,
             state_bound,
@@ -922,6 +937,7 @@ fn deserialize_enum_variant_arm(
     ident: &syn::Ident,
     variant: &VariantDecl<'_>,
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -943,7 +959,7 @@ fn deserialize_enum_variant_arm(
             let field = &variant.fields.fields[0];
             let ty = field.ty();
             if field.attrs.with.is_some() {
-                let seed = with_deserialize_seed(field);
+                let seed = with_deserialize_seed(field, explicit_state, state_bound);
                 quote! {
                     (__Variant::#variant_ident, __variant) => {
                         let __seed = #seed;
@@ -976,6 +992,7 @@ fn deserialize_enum_variant_arm(
                 variant_ident,
                 &variant.fields.fields,
                 state_tokens,
+                explicit_state,
                 generics,
                 include_state_param,
                 state_bound,
@@ -1004,6 +1021,7 @@ fn deserialize_enum_variant_arm(
                 variant_ident,
                 &variant.fields.fields,
                 state_tokens,
+                explicit_state,
                 generics,
                 include_state_param,
                 state_bound,
@@ -1032,6 +1050,7 @@ fn tuple_variant_visitor(
     variant_ident: &syn::Ident,
     fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -1047,7 +1066,7 @@ fn tuple_variant_visitor(
         let ty = field.ty();
         let idx = index;
         if field.attrs.with.is_some() {
-            let seed = with_deserialize_seed(field);
+            let seed = with_deserialize_seed(field, explicit_state, state_bound);
             quote! {
                 let __seed = #seed;
                 let #binding = match _serde::de::SeqAccess::next_element_seed(&mut __seq, __seed)? {
@@ -1134,6 +1153,7 @@ fn struct_variant_helpers(
     variant_ident: &syn::Ident,
     fields: &[FieldDecl<'_>],
     state_tokens: &TokenStream,
+    explicit_state: Option<&Type>,
     generics: &Generics,
     include_state_param: bool,
     state_bound: Option<&Type>,
@@ -1228,7 +1248,7 @@ fn struct_variant_helpers(
             let ty = field.ty();
             let field_name = field.attrs.key(ident);
             let assignment = if field.attrs.with.is_some() {
-                let seed = with_deserialize_seed(field);
+                let seed = with_deserialize_seed(field, explicit_state, state_bound);
                 quote! {
                     let __seed = #seed;
                     #ident = ::core::option::Option::Some(
@@ -1343,37 +1363,78 @@ fn struct_variant_helpers(
     }
 }
 
-fn with_deserialize_seed(field: &FieldDecl<'_>) -> TokenStream {
+fn with_deserialize_seed(
+    field: &FieldDecl<'_>,
+    explicit_state: Option<&Type>,
+    state_bound: Option<&Type>,
+) -> TokenStream {
     let ty = field.ty();
     let with = field
         .attrs
         .with
         .as_ref()
         .expect("with_deserialize_seed used without `with`");
-    quote! {
-        {
-            struct __SerdeStateWithSeed<'state, State: ?Sized> {
-                state: &'state State,
-            }
-
-            impl<'de, 'state, State: ?Sized> _serde::de::DeserializeSeed<'de>
-                for __SerdeStateWithSeed<'state, State>
+    match explicit_state {
+        Some(state_ty) => quote! {
             {
-                type Value = #ty;
+                struct __SerdeStateWithSeed<'state> {
+                    state: &'state #state_ty,
+                }
 
-                fn deserialize<__D>(
-                    self,
-                    __deserializer: __D,
-                ) -> ::core::result::Result<Self::Value, __D::Error>
-                where
-                    __D: _serde::Deserializer<'de>,
+                impl<'de, 'state> _serde::de::DeserializeSeed<'de>
+                    for __SerdeStateWithSeed<'state>
                 {
-                    #with::deserialize_state(self.state, __deserializer)
+                    type Value = #ty;
+
+                    fn deserialize<__D>(
+                        self,
+                        __deserializer: __D,
+                    ) -> ::core::result::Result<Self::Value, __D::Error>
+                    where
+                        __D: _serde::Deserializer<'de>,
+                    {
+                        #with::deserialize_state(self.state, __deserializer)
+                    }
+                }
+
+                __SerdeStateWithSeed { state }
+            }
+        },
+        None => {
+            let bound = state_bound_clause(state_bound);
+            quote! {
+                {
+                    struct __SerdeStateWithSeed<'state, State: ?Sized #bound> {
+                        state: &'state State,
+                    }
+
+                    impl<'de, 'state, State: ?Sized #bound> _serde::de::DeserializeSeed<'de>
+                        for __SerdeStateWithSeed<'state, State>
+                    {
+                        type Value = #ty;
+
+                        fn deserialize<__D>(
+                            self,
+                            __deserializer: __D,
+                        ) -> ::core::result::Result<Self::Value, __D::Error>
+                        where
+                            __D: _serde::Deserializer<'de>,
+                        {
+                            #with::deserialize_state(self.state, __deserializer)
+                        }
+                    }
+
+                    __SerdeStateWithSeed { state }
                 }
             }
-
-            __SerdeStateWithSeed { state }
         }
+    }
+}
+
+fn state_bound_clause(bound: Option<&Type>) -> TokenStream {
+    match bound {
+        Some(ty) => quote!(+ #ty),
+        None => TokenStream::new(),
     }
 }
 

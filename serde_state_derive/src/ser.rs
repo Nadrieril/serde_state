@@ -46,6 +46,7 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = decl.generics.where_clause.clone();
     let state_tokens = state_type_tokens(decl);
+    let explicit_state = decl.attrs.state.as_ref();
     let field_types = collect_field_types_from_fields(&data.fields);
     if infer_bounds {
         add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
@@ -63,10 +64,11 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
     };
     let ident = decl.ident;
 
+    let state_bound = decl.attrs.state_bound.as_ref();
     let body = if decl.attrs.transparent {
-        serialize_transparent(&data.fields)?
+        serialize_transparent(&data.fields, explicit_state, state_bound)?
     } else {
-        serialize_struct_body(ident, &data.fields)?
+        serialize_struct_body(ident, &data.fields, explicit_state, state_bound)?
     };
 
     let default_serde_impl = default_serde_impl(decl, ident);
@@ -106,6 +108,7 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = decl.generics.where_clause.clone();
     let state_tokens = state_type_tokens(decl);
+    let explicit_state = decl.attrs.state.as_ref();
     let field_types = collect_field_types_from_enum(data);
     if infer_bounds {
         add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
@@ -123,7 +126,7 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
     };
     let ident = decl.ident;
 
-    let body = serialize_enum_body(ident, data)?;
+    let body = serialize_enum_body(ident, data, explicit_state, decl.attrs.state_bound.as_ref())?;
     let default_serde_impl = default_serde_impl(decl, ident);
 
     Ok(quote! {
@@ -145,17 +148,36 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
     })
 }
 
-fn serialize_transparent(fields: &FieldsDecl<'_>) -> syn::Result<TokenStream> {
+fn state_bound_clause(bound: Option<&Type>) -> TokenStream {
+    match bound {
+        Some(ty) => quote!(+ #ty),
+        None => TokenStream::new(),
+    }
+}
+
+fn serialize_transparent(
+    fields: &FieldsDecl<'_>,
+    explicit_state: Option<&Type>,
+    state_bound: Option<&Type>,
+) -> syn::Result<TokenStream> {
     match fields.style {
         FieldsStyle::Named if fields.fields.len() == 1 => {
             let field = &fields.fields[0];
             let ident = field.ident().unwrap();
-            Ok(serialize_transparent_call(field, quote!(&self.#ident)))
+            let call =
+                serialize_field_expr(field, quote!(&self.#ident), explicit_state, state_bound);
+            Ok(quote! {
+                _serde::Serialize::serialize(#call, __serializer)
+            })
         }
         FieldsStyle::Unnamed if fields.fields.len() == 1 => {
             let index = syn::Index::from(0);
             let field = &fields.fields[0];
-            Ok(serialize_transparent_call(field, quote!(&self.#index)))
+            let call =
+                serialize_field_expr(field, quote!(&self.#index), explicit_state, state_bound);
+            Ok(quote! {
+                _serde::Serialize::serialize(#call, __serializer)
+            })
         }
         _ => Err(syn::Error::new(
             fields.span,
@@ -164,21 +186,19 @@ fn serialize_transparent(fields: &FieldsDecl<'_>) -> syn::Result<TokenStream> {
     }
 }
 
-fn serialize_transparent_call(field: &FieldDecl<'_>, value: TokenStream) -> TokenStream {
-    match field.mode() {
-        ItemMode::Stateful => quote! {
-            _serde_state::SerializeState::serialize_state(#value, __state, __serializer)
-        },
-        ItemMode::Stateless => quote! {
-            _serde::Serialize::serialize(#value, __serializer)
-        },
-    }
-}
-
-fn serialize_struct_body(ident: &syn::Ident, fields: &FieldsDecl<'_>) -> syn::Result<TokenStream> {
+fn serialize_struct_body(
+    ident: &syn::Ident,
+    fields: &FieldsDecl<'_>,
+    explicit_state: Option<&Type>,
+    state_bound: Option<&Type>,
+) -> syn::Result<TokenStream> {
     Ok(match fields.style {
-        FieldsStyle::Named => serialize_named_fields(ident, &fields.fields)?,
-        FieldsStyle::Unnamed => serialize_unnamed_fields(ident, &fields.fields),
+        FieldsStyle::Named => {
+            serialize_named_fields(ident, &fields.fields, explicit_state, state_bound)?
+        }
+        FieldsStyle::Unnamed => {
+            serialize_unnamed_fields(ident, &fields.fields, explicit_state, state_bound)
+        }
         FieldsStyle::Unit => serialize_unit_struct(ident),
     })
 }
@@ -186,6 +206,8 @@ fn serialize_struct_body(ident: &syn::Ident, fields: &FieldsDecl<'_>) -> syn::Re
 fn serialize_named_fields(
     ident: &syn::Ident,
     fields: &[FieldDecl<'_>],
+    explicit_state: Option<&Type>,
+    state_bound: Option<&Type>,
 ) -> syn::Result<TokenStream> {
     let type_name = ident.to_string();
     let len = fields.iter().filter(|field| !field.attrs.skip).count();
@@ -195,7 +217,12 @@ fn serialize_named_fields(
         .map(|field| {
             let field_ident = field.ident().unwrap();
             let key = field.attrs.key(field_ident);
-            let call = serialize_field_expr(field, quote!(&self.#field_ident));
+            let call = serialize_field_expr(
+                field,
+                quote!(&self.#field_ident),
+                explicit_state,
+                state_bound,
+            );
             quote! {
                 _serde::ser::SerializeStruct::serialize_field(
                     &mut __serde_state,
@@ -212,12 +239,22 @@ fn serialize_named_fields(
     })
 }
 
-fn serialize_unnamed_fields(ident: &syn::Ident, fields: &[FieldDecl<'_>]) -> TokenStream {
+fn serialize_unnamed_fields(
+    ident: &syn::Ident,
+    fields: &[FieldDecl<'_>],
+    explicit_state: Option<&Type>,
+    state_bound: Option<&Type>,
+) -> TokenStream {
     match fields.len() {
         0 => serialize_unit_struct(ident),
         1 => {
             let index = syn::Index::from(0);
-            let call = serialize_field_expr(&fields[0], quote!(&self.#index));
+            let call = serialize_field_expr(
+                &fields[0],
+                quote!(&self.#index),
+                explicit_state,
+                state_bound,
+            );
             quote! {
                 _serde::Serializer::serialize_newtype_struct(
                     __serializer,
@@ -229,7 +266,8 @@ fn serialize_unnamed_fields(ident: &syn::Ident, fields: &[FieldDecl<'_>]) -> Tok
         len => {
             let serialize_fields = fields.iter().enumerate().map(|(i, field)| {
                 let index = syn::Index::from(i);
-                let call = serialize_field_expr(field, quote!(&self.#index));
+                let call =
+                    serialize_field_expr(field, quote!(&self.#index), explicit_state, state_bound);
                 quote! {
                     _serde::ser::SerializeTupleStruct::serialize_field(
                         &mut __serde_state,
@@ -256,26 +294,53 @@ fn serialize_unit_struct(ident: &syn::Ident) -> TokenStream {
     }
 }
 
-fn serialize_field_expr(field: &FieldDecl<'_>, value: TokenStream) -> TokenStream {
+fn serialize_field_expr(
+    field: &FieldDecl<'_>,
+    value: TokenStream,
+    explicit_state: Option<&Type>,
+    state_bound: Option<&Type>,
+) -> TokenStream {
     if let Some(with) = &field.attrs.with {
         let ty = field.ty();
-        quote!(&{
-            struct __SerdeStateWith<'state, State: ?Sized> {
-                value: &'state #ty,
-                state: &'state State,
-            }
-
-            impl<'state, State: ?Sized> _serde::Serialize for __SerdeStateWith<'state, State> {
-                fn serialize<__S>(&self, __serializer: __S) -> Result<__S::Ok, __S::Error>
-                where
-                    __S: _serde::Serializer,
-                {
-                    #with::serialize_state(self.value, self.state, __serializer)
+        match explicit_state {
+            Some(state_ty) => quote!(&{
+                struct __SerdeStateWith<'state> {
+                    value: &'state #ty,
+                    state: &'state #state_ty,
                 }
-            }
 
-            __SerdeStateWith { value: #value, state: __state }
-        })
+                impl<'state> _serde::Serialize for __SerdeStateWith<'state> {
+                    fn serialize<__S>(&self, __serializer: __S) -> Result<__S::Ok, __S::Error>
+                    where
+                        __S: _serde::Serializer,
+                    {
+                        #with::serialize_state(self.value, self.state, __serializer)
+                    }
+                }
+
+                __SerdeStateWith { value: #value, state: __state }
+            }),
+            None => {
+                let bound = state_bound_clause(state_bound);
+                quote!(&{
+                    struct __SerdeStateWith<'state, State: ?Sized #bound> {
+                        value: &'state #ty,
+                        state: &'state State,
+                    }
+
+                    impl<'state, State: ?Sized #bound> _serde::Serialize for __SerdeStateWith<'state, State> {
+                        fn serialize<__S>(&self, __serializer: __S) -> Result<__S::Ok, __S::Error>
+                        where
+                            __S: _serde::Serializer,
+                        {
+                            #with::serialize_state(self.value, self.state, __serializer)
+                        }
+                    }
+
+                    __SerdeStateWith { value: #value, state: __state }
+                })
+            }
+        }
     } else {
         match field.mode() {
             ItemMode::Stateful => quote!(&_serde_state::__private::wrap_serialize(#value, __state)),
@@ -284,13 +349,26 @@ fn serialize_field_expr(field: &FieldDecl<'_>, value: TokenStream) -> TokenStrea
     }
 }
 
-fn serialize_enum_body(ident: &syn::Ident, data: &EnumDecl<'_>) -> syn::Result<TokenStream> {
+fn serialize_enum_body(
+    ident: &syn::Ident,
+    data: &EnumDecl<'_>,
+    explicit_state: Option<&Type>,
+    state_bound: Option<&Type>,
+) -> syn::Result<TokenStream> {
     let type_name = ident.to_string();
     let variants = data
         .variants
         .iter()
         .enumerate()
-        .map(|(index, variant)| serialize_enum_variant(variant, index as u32, &type_name))
+        .map(|(index, variant)| {
+            serialize_enum_variant(
+                variant,
+                index as u32,
+                &type_name,
+                explicit_state,
+                state_bound,
+            )
+        })
         .collect::<syn::Result<Vec<_>>>()?;
 
     Ok(quote! {
@@ -304,6 +382,8 @@ fn serialize_enum_variant(
     variant: &VariantDecl<'_>,
     index: u32,
     type_name: &str,
+    explicit_state: Option<&Type>,
+    state_bound: Option<&Type>,
 ) -> syn::Result<TokenStream> {
     let variant_ident = variant.ident;
     let variant_name = variant_ident.to_string();
@@ -323,7 +403,7 @@ fn serialize_enum_variant(
         FieldsStyle::Unnamed if variant.fields.fields.len() == 1 => {
             let binding = format_ident!("__variant_{}_field", index);
             let field = &variant.fields.fields[0];
-            let call = serialize_field_expr(field, quote!(#binding));
+            let call = serialize_field_expr(field, quote!(#binding), explicit_state, state_bound);
             quote! {
                 Self::#variant_ident(ref #binding) => {
                     _serde::Serializer::serialize_newtype_variant(
@@ -346,7 +426,12 @@ fn serialize_enum_variant(
                     .iter()
                     .zip(variant.fields.fields.iter())
                     .map(|(binding, field)| {
-                        let call = serialize_field_expr(field, quote!(#binding));
+                        let call = serialize_field_expr(
+                            field,
+                            quote!(#binding),
+                            explicit_state,
+                            state_bound,
+                        );
                         quote! {
                             _serde::ser::SerializeTupleVariant::serialize_field(
                                 &mut __serde_state,
@@ -389,7 +474,8 @@ fn serialize_enum_variant(
                 .map(|field| {
                     let ident = field.ident().unwrap();
                     let name = field.attrs.key(ident);
-                    let call = serialize_field_expr(field, quote!(#ident));
+                    let call =
+                        serialize_field_expr(field, quote!(#ident), explicit_state, state_bound);
                     quote! {
                         _serde::ser::SerializeStructVariant::serialize_field(
                             &mut __serde_state,

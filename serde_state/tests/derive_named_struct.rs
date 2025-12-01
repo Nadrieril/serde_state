@@ -259,6 +259,13 @@ struct WithHelperField {
     counter: CounterValue,
 }
 
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(state_implements = RecorderLike)]
+struct TraitBoundWithHelper {
+    #[serde(with = "counter_passthrough")]
+    counter: CounterValue,
+}
+
 struct NeedsNoBounds;
 
 #[test]
@@ -619,6 +626,29 @@ fn serde_with_calls_custom_helpers() {
     let decoded = WithHelperField::deserialize_state(&state, &mut deserializer).unwrap();
     assert_eq!(decoded.counter, CounterValue(7));
     assert_eq!(state.deserialized.get(), 0);
+}
+
+#[test]
+fn serde_with_fields_respect_state_bounds() {
+    let value = TraitBoundWithHelper {
+        counter: CounterValue(9),
+    };
+
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        value
+            .serialize_state(&state, &mut serializer)
+            .expect("state-bound with serialization");
+    }
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, json!({"counter": 109}));
+
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = TraitBoundWithHelper::deserialize_state(&state, &mut deserializer)
+        .expect("state-bound with deserialization");
+    assert_eq!(decoded, value);
 }
 
 #[test]
