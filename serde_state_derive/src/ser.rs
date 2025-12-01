@@ -69,6 +69,8 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
         serialize_struct_body(ident, &data.fields)?
     };
 
+    let default_serde_impl = default_serde_impl(decl, ident);
+
     Ok(quote! {
         #[automatically_derived]
         impl #impl_generics _serde_state::SerializeState<#state_tokens> for #ident #ty_generics #where_clause_tokens {
@@ -83,6 +85,8 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
                 #body
             }
         }
+
+        #default_serde_impl
     })
 }
 
@@ -120,6 +124,7 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
     let ident = decl.ident;
 
     let body = serialize_enum_body(ident, data)?;
+    let default_serde_impl = default_serde_impl(decl, ident);
 
     Ok(quote! {
         #[automatically_derived]
@@ -135,6 +140,8 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
                 #body
             }
         }
+
+        #default_serde_impl
     })
 }
 
@@ -518,4 +525,45 @@ fn add_state_param(
         }
     }
     generics
+}
+
+fn quote_where_clause(clause: &Option<syn::WhereClause>) -> TokenStream {
+    match clause {
+        Some(clause) => quote!(#clause),
+        None => TokenStream::new(),
+    }
+}
+
+fn default_serde_impl(decl: &TypeDecl, ident: &syn::Ident) -> Option<TokenStream> {
+    let state_ty = decl.attrs.default_state.as_ref()?;
+    let (impl_generics, ty_generics, _) = decl.generics.split_for_impl();
+    let mut where_clause = decl.generics.where_clause.clone();
+    add_default_state_bound(&mut where_clause, state_ty);
+    let where_clause_tokens = quote_where_clause(&where_clause);
+    Some(quote! {
+        #[automatically_derived]
+        impl #impl_generics _serde::Serialize for #ident #ty_generics #where_clause_tokens {
+            fn serialize<__S>(&self, __serializer: __S) -> ::core::result::Result<__S::Ok, __S::Error>
+            where
+                __S: _serde::Serializer,
+            {
+                let __default_state = <#state_ty as ::core::default::Default>::default();
+                _serde_state::SerializeState::serialize_state(
+                    self,
+                    &__default_state,
+                    __serializer,
+                )
+            }
+        }
+    })
+}
+
+fn add_default_state_bound(where_clause: &mut Option<syn::WhereClause>, state_ty: &Type) {
+    let clause = where_clause.get_or_insert_with(|| syn::WhereClause {
+        where_token: Default::default(),
+        predicates: Default::default(),
+    });
+    clause
+        .predicates
+        .push(parse_quote!(#state_ty: ::core::default::Default));
 }

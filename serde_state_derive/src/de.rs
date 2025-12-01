@@ -74,6 +74,7 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
             &where_clause,
         )
     };
+    let default_deser_impl = default_deserialize_impl(decl, ident);
 
     Ok(quote! {
         #[automatically_derived]
@@ -88,6 +89,8 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
                 #body
             }
         }
+
+        #default_deser_impl
     })
 }
 
@@ -133,6 +136,7 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
         decl.attrs.state_bound.as_ref(),
         &where_clause,
     );
+    let default_deser_impl = default_deserialize_impl(decl, ident);
 
     Ok(quote! {
         #[automatically_derived]
@@ -147,6 +151,8 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
                 #body
             }
         }
+
+        #default_deser_impl
     })
 }
 
@@ -1564,4 +1570,43 @@ fn push_default_bound(where_clause: &mut Option<syn::WhereClause>, ty: &Type) {
     clause
         .predicates
         .push(parse_quote!(#ty: ::core::default::Default));
+}
+
+fn add_default_state_bound(where_clause: &mut Option<syn::WhereClause>, state_ty: &Type) {
+    let clause = where_clause.get_or_insert_with(|| syn::WhereClause {
+        where_token: Default::default(),
+        predicates: Default::default(),
+    });
+    clause
+        .predicates
+        .push(parse_quote!(#state_ty: ::core::default::Default));
+}
+
+fn default_deserialize_impl(decl: &TypeDecl, ident: &syn::Ident) -> Option<TokenStream> {
+    let state_ty = decl.attrs.default_state.as_ref()?;
+    let mut impl_generics = decl.generics.clone();
+    impl_generics.params.insert(0, parse_quote!('de));
+    let (impl_generics_tokens, _, _) = impl_generics.split_for_impl();
+    let (_, ty_generics, _) = decl.generics.split_for_impl();
+    let mut where_clause = decl.generics.where_clause.clone();
+    add_default_state_bound(&mut where_clause, state_ty);
+    let where_clause_tokens = quote_where_clause(&where_clause);
+
+    Some(quote! {
+        #[automatically_derived]
+        impl #impl_generics_tokens _serde::Deserialize<'de> for #ident #ty_generics #where_clause_tokens {
+            fn deserialize<__D>(
+                __deserializer: __D,
+            ) -> ::core::result::Result<Self, __D::Error>
+            where
+                __D: _serde::Deserializer<'de>,
+            {
+                let __default_state = <#state_ty as ::core::default::Default>::default();
+                _serde_state::DeserializeState::deserialize_state(
+                    &__default_state,
+                    __deserializer,
+                )
+            }
+        }
+    })
 }

@@ -143,6 +143,7 @@ pub struct ContainerAttributes {
     pub serde_path: Option<syn::Path>,
     pub state: Option<Type>,
     pub state_bound: Option<Type>,
+    pub default_state: Option<Type>,
     pub mode: ItemMode,
 }
 
@@ -153,6 +154,7 @@ impl ContainerAttributes {
             serde_path: None,
             state: None,
             state_bound: None,
+            default_state: None,
             mode: ItemMode::Stateful,
         };
 
@@ -206,6 +208,19 @@ impl ContainerAttributes {
                     }
                     let ty = meta.value()?.parse()?;
                     result.state_bound = Some(ty);
+                    return Ok(());
+                }
+                if meta.path.is_ident("default_state") {
+                    if !is_serde_state {
+                        return Err(meta.error(
+                            "`default_state` must be specified with `serde_state(default_state = ..)`",
+                        ));
+                    }
+                    if result.default_state.is_some() {
+                        return Err(meta.error("duplicate `default_state` attribute"));
+                    }
+                    let ty = meta.value()?.parse()?;
+                    result.default_state = Some(ty);
                     return Ok(());
                 }
                 if meta.path.is_ident("stateless") {

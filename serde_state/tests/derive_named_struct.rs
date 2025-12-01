@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_state::{DeserializeState, SerializeState};
+use std::thread_local;
 use std::{cell::Cell, marker::PhantomData};
 
 #[derive(Default)]
@@ -31,6 +32,47 @@ impl RecorderLike for Recorder {
 
     fn deserialized_count(&self) -> usize {
         self.deserialized.get()
+    }
+}
+
+thread_local! {
+    static GLOBAL_SERIALIZED: Cell<usize> = Cell::new(0);
+    static GLOBAL_DESERIALIZED: Cell<usize> = Cell::new(0);
+}
+
+#[derive(Clone, Copy, Default)]
+struct GlobalRecorder;
+
+impl GlobalRecorder {
+    fn reset() {
+        GLOBAL_SERIALIZED.with(|c| c.set(0));
+        GLOBAL_DESERIALIZED.with(|c| c.set(0));
+    }
+
+    fn serialized() -> usize {
+        GLOBAL_SERIALIZED.with(|c| c.get())
+    }
+
+    fn deserialized() -> usize {
+        GLOBAL_DESERIALIZED.with(|c| c.get())
+    }
+}
+
+impl RecorderLike for GlobalRecorder {
+    fn mark_serialized(&self) {
+        GLOBAL_SERIALIZED.with(|c| c.set(c.get() + 1));
+    }
+
+    fn mark_deserialized(&self) {
+        GLOBAL_DESERIALIZED.with(|c| c.set(c.get() + 1));
+    }
+
+    fn serialized_count(&self) -> usize {
+        GlobalRecorder::serialized()
+    }
+
+    fn deserialized_count(&self) -> usize {
+        GlobalRecorder::deserialized()
     }
 }
 
@@ -201,6 +243,12 @@ struct GenericContainer<T> {
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 #[serde_state(state_implements = RecorderLike)]
 struct TraitBoundContainer {
+    value: GenericCounterValue,
+}
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(state_implements = RecorderLike, default_state = GlobalRecorder)]
+struct AutoSerdeContainer {
     value: GenericCounterValue,
 }
 
@@ -571,6 +619,23 @@ fn serde_with_calls_custom_helpers() {
     let decoded = WithHelperField::deserialize_state(&state, &mut deserializer).unwrap();
     assert_eq!(decoded.counter, CounterValue(7));
     assert_eq!(state.deserialized.get(), 0);
+}
+
+#[test]
+fn default_state_generates_plain_serde_impls() {
+    let value = AutoSerdeContainer {
+        value: GenericCounterValue(42),
+    };
+
+    GlobalRecorder::reset();
+    let json = serde_json::to_string(&value).expect("auto serde serialization");
+    assert_eq!(json, json!({"value": 42}).to_string());
+    assert_eq!(GlobalRecorder::serialized(), 1);
+
+    let decoded: AutoSerdeContainer =
+        serde_json::from_str(&json).expect("auto serde deserialization");
+    assert_eq!(decoded, value);
+    assert_eq!(GlobalRecorder::deserialized(), 1);
 }
 
 #[test]
