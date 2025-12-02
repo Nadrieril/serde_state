@@ -46,7 +46,6 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = decl.generics.where_clause.clone();
     let state_tokens = state_type_tokens(decl);
-    let explicit_state = decl.attrs.state.as_ref();
     let field_types = collect_field_types_from_fields(&data.fields);
     if infer_bounds {
         add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
@@ -65,6 +64,7 @@ fn derive_struct(decl: &TypeDecl, data: &StructDecl) -> syn::Result<TokenStream>
     let ident = decl.ident;
 
     let state_bound = decl.attrs.state_bound.as_ref();
+    let explicit_state = decl.attrs.state.as_ref();
     let body = if decl.attrs.transparent {
         serialize_transparent(&data.fields, explicit_state, state_bound)?
     } else {
@@ -108,7 +108,6 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
     let ty_generics = quote!(#ty_generics_ref);
     let mut where_clause = decl.generics.where_clause.clone();
     let state_tokens = state_type_tokens(decl);
-    let explicit_state = decl.attrs.state.as_ref();
     let field_types = collect_field_types_from_enum(data);
     if infer_bounds {
         add_serialize_bounds_from_types(&mut where_clause, &field_types, &state_tokens);
@@ -125,7 +124,7 @@ fn derive_enum(decl: &TypeDecl, data: &EnumDecl) -> syn::Result<TokenStream> {
         None => TokenStream::new(),
     };
     let ident = decl.ident;
-
+    let explicit_state = decl.attrs.state.as_ref();
     let body = serialize_enum_body(ident, data, explicit_state, decl.attrs.state_bound.as_ref())?;
     let default_serde_impl = default_serde_impl(decl, ident);
 
@@ -328,7 +327,9 @@ fn serialize_field_expr(
                         state: &'state State,
                     }
 
-                    impl<'state, State: ?Sized #bound> _serde::Serialize for __SerdeStateWith<'state, State> {
+                    impl<'state, State: ?Sized #bound> _serde::Serialize
+                        for __SerdeStateWith<'state, State>
+                    {
                         fn serialize<__S>(&self, __serializer: __S) -> Result<__S::Ok, __S::Error>
                         where
                             __S: _serde::Serializer,
@@ -517,7 +518,7 @@ impl<'a> FieldType<'a> {
 fn collect_field_types_from_fields<'a>(fields: &'a FieldsDecl<'a>) -> Vec<FieldType<'a>> {
     let mut result = Vec::new();
     for field in &fields.fields {
-        if field.attrs.skip || field.attrs.with.is_some() {
+        if field.attrs.skip {
             continue;
         }
         result.push(FieldType::new(field.ty(), field.mode()));

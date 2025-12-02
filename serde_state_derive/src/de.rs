@@ -1472,7 +1472,7 @@ fn collect_field_types_from_fields<'a>(fields: &'a FieldsDecl<'a>) -> Vec<FieldT
         .fields
         .iter()
         .filter_map(|field| {
-            if field.attrs.skip || field.attrs.with.is_some() {
+            if field.attrs.skip {
                 return None;
             }
             Some(FieldType::new(field.ty(), field.mode()))

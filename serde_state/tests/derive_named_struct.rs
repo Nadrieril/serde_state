@@ -154,6 +154,71 @@ mod counter_passthrough {
     }
 }
 
+mod counter_vec_passthrough {
+    use serde::ser::SerializeSeq;
+    use serde_state::{DeserializeState, SerializeState};
+    use std::marker::PhantomData;
+
+    pub fn serialize_state<S, State: ?Sized, T>(
+        values: &Vec<T>,
+        state: &State,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+        T: SerializeState<State>,
+    {
+        let mut seq = serializer.serialize_seq(Some(values.len()))?;
+        for value in values {
+            seq.serialize_element(&serde_state::__private::wrap_serialize(value, state))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize_state<'de, State: ?Sized, T, D>(
+        state: &State,
+        deserializer: D,
+    ) -> Result<Vec<T>, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        T: DeserializeState<'de, State>,
+    {
+        struct Visitor<'state, State: ?Sized, T> {
+            state: &'state State,
+            marker: PhantomData<T>,
+        }
+
+        impl<'de, 'state, State: ?Sized, T> serde::de::Visitor<'de> for Visitor<'state, State, T>
+        where
+            T: DeserializeState<'de, State>,
+        {
+            type Value = Vec<T>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("sequence of counter values")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element_seed(
+                    serde_state::__private::wrap_deserialize_seed::<T, State>(self.state),
+                )? {
+                    values.push(value);
+                }
+                Ok(values)
+            }
+        }
+
+        deserializer.deserialize_seq(Visitor {
+            state,
+            marker: PhantomData,
+        })
+    }
+}
+
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 struct Example {
     first: CounterValue,
@@ -264,6 +329,13 @@ struct WithHelperField {
 struct TraitBoundWithHelper {
     #[serde(with = "counter_passthrough")]
     counter: CounterValue,
+}
+
+#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[serde_state(state_implements = RecorderLike)]
+struct VecWithHelpers {
+    #[serde(with = "counter_vec_passthrough")]
+    counters: Vec<GenericCounterValue>,
 }
 
 struct NeedsNoBounds;
@@ -649,6 +721,31 @@ fn serde_with_fields_respect_state_bounds() {
     let decoded = TraitBoundWithHelper::deserialize_state(&state, &mut deserializer)
         .expect("state-bound with deserialization");
     assert_eq!(decoded, value);
+}
+
+#[test]
+fn serde_with_vec_fields_infers_bounds() {
+    let value = VecWithHelpers {
+        counters: vec![GenericCounterValue(3), GenericCounterValue(4)],
+    };
+
+    let state = Recorder::default();
+    let mut buffer = Vec::new();
+    {
+        let mut serializer = serde_json::Serializer::new(&mut buffer);
+        value
+            .serialize_state(&state, &mut serializer)
+            .expect("vector helper serialization");
+    }
+    assert_eq!(state.serialized_count(), 2);
+    let json_value: serde_json::Value = serde_json::from_slice(&buffer).unwrap();
+    assert_eq!(json_value, json!({"counters": [3, 4]}));
+
+    let mut deserializer = serde_json::Deserializer::from_slice(&buffer);
+    let decoded = VecWithHelpers::deserialize_state(&state, &mut deserializer)
+        .expect("vector helper deserialization");
+    assert_eq!(decoded, value);
+    assert_eq!(state.deserialized_count(), 2);
 }
 
 #[test]
