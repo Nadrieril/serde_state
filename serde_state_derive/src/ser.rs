@@ -301,46 +301,72 @@ fn serialize_field_expr(
 ) -> TokenStream {
     if let Some(with) = &field.attrs.with {
         let ty = field.ty();
-        match explicit_state {
-            Some(state_ty) => quote!(&{
+        let (call, field_bound) = match field.mode() {
+            ItemMode::Stateful => (
+                quote!(#with::serialize_state(self.value, self.state, __serializer)),
+                match explicit_state {
+                    Some(state_ty) => quote!(#ty: _serde_state::SerializeState<#state_ty>),
+                    None => quote!(#ty: _serde_state::SerializeState<State>),
+                },
+            ),
+            ItemMode::Stateless => (
+                quote!({
+                    let _ = self.state;
+                    #with::serialize(self.value, __serializer)
+                }),
+                quote!(#ty: _serde::Serialize),
+            ),
+        };
+        if let Some(state_ty) = explicit_state {
+            quote!(&{
                 struct __SerdeStateWith<'state> {
                     value: &'state #ty,
                     state: &'state #state_ty,
                 }
 
-                impl<'state> _serde::Serialize for __SerdeStateWith<'state> {
+                impl<'state> _serde::Serialize for __SerdeStateWith<'state>
+                where
+                    #field_bound,
+                {
                     fn serialize<__S>(&self, __serializer: __S) -> Result<__S::Ok, __S::Error>
                     where
                         __S: _serde::Serializer,
                     {
-                        #with::serialize_state(self.value, self.state, __serializer)
+                        #call
                     }
                 }
 
-                __SerdeStateWith { value: #value, state: __state }
-            }),
-            None => {
-                let bound = state_bound_clause(state_bound);
-                quote!(&{
-                    struct __SerdeStateWith<'state, State: ?Sized #bound> {
-                        value: &'state #ty,
-                        state: &'state State,
-                    }
+                __SerdeStateWith {
+                    value: #value,
+                    state: __state,
+                }
+            })
+        } else {
+            let bound = state_bound_clause(state_bound);
+            quote!(&{
+                struct __SerdeStateWith<'state, State: ?Sized #bound> {
+                    value: &'state #ty,
+                    state: &'state State,
+                }
 
-                    impl<'state, State: ?Sized #bound> _serde::Serialize
-                        for __SerdeStateWith<'state, State>
+                impl<'state, State: ?Sized #bound> _serde::Serialize
+                    for __SerdeStateWith<'state, State>
+                where
+                    #field_bound,
+                {
+                    fn serialize<__S>(&self, __serializer: __S) -> Result<__S::Ok, __S::Error>
+                    where
+                        __S: _serde::Serializer,
                     {
-                        fn serialize<__S>(&self, __serializer: __S) -> Result<__S::Ok, __S::Error>
-                        where
-                            __S: _serde::Serializer,
-                        {
-                            #with::serialize_state(self.value, self.state, __serializer)
-                        }
+                        #call
                     }
+                }
 
-                    __SerdeStateWith { value: #value, state: __state }
-                })
-            }
+                __SerdeStateWith {
+                    value: #value,
+                    state: __state,
+                }
+            })
         }
     } else {
         match field.mode() {

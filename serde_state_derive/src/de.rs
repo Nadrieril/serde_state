@@ -1374,8 +1374,8 @@ fn with_deserialize_seed(
         .with
         .as_ref()
         .expect("with_deserialize_seed used without `with`");
-    match explicit_state {
-        Some(state_ty) => quote! {
+    match (explicit_state, field.mode()) {
+        (Some(state_ty), ItemMode::Stateful) => quote! {
             {
                 struct __SerdeStateWithSeed<'state> {
                     state: &'state #state_ty,
@@ -1383,6 +1383,8 @@ fn with_deserialize_seed(
 
                 impl<'de, 'state> _serde::de::DeserializeSeed<'de>
                     for __SerdeStateWithSeed<'state>
+                where
+                    #ty: _serde_state::DeserializeState<'de, #state_ty>,
                 {
                     type Value = #ty;
 
@@ -1400,7 +1402,35 @@ fn with_deserialize_seed(
                 __SerdeStateWithSeed { state }
             }
         },
-        None => {
+        (Some(state_ty), ItemMode::Stateless) => quote! {
+            {
+                struct __SerdeStateWithSeed<'state> {
+                    state: &'state #state_ty,
+                }
+
+                impl<'de, 'state> _serde::de::DeserializeSeed<'de>
+                    for __SerdeStateWithSeed<'state>
+                where
+                    #ty: _serde::Deserialize<'de>,
+                {
+                    type Value = #ty;
+
+                    fn deserialize<__D>(
+                        self,
+                        __deserializer: __D,
+                    ) -> ::core::result::Result<Self::Value, __D::Error>
+                    where
+                        __D: _serde::Deserializer<'de>,
+                    {
+                        let _ = self.state;
+                        #with::deserialize(__deserializer)
+                    }
+                }
+
+                __SerdeStateWithSeed { state }
+            }
+        },
+        (None, ItemMode::Stateful) => {
             let bound = state_bound_clause(state_bound);
             quote! {
                 {
@@ -1410,6 +1440,8 @@ fn with_deserialize_seed(
 
                     impl<'de, 'state, State: ?Sized #bound> _serde::de::DeserializeSeed<'de>
                         for __SerdeStateWithSeed<'state, State>
+                    where
+                        #ty: _serde_state::DeserializeState<'de, State>,
                     {
                         type Value = #ty;
 
@@ -1421,6 +1453,37 @@ fn with_deserialize_seed(
                             __D: _serde::Deserializer<'de>,
                         {
                             #with::deserialize_state(self.state, __deserializer)
+                        }
+                    }
+
+                    __SerdeStateWithSeed { state }
+                }
+            }
+        }
+        (None, ItemMode::Stateless) => {
+            let bound = state_bound_clause(state_bound);
+            quote! {
+                {
+                    struct __SerdeStateWithSeed<'state, State: ?Sized #bound> {
+                        state: &'state State,
+                    }
+
+                    impl<'de, 'state, State: ?Sized #bound> _serde::de::DeserializeSeed<'de>
+                        for __SerdeStateWithSeed<'state, State>
+                    where
+                        #ty: _serde::Deserialize<'de>,
+                    {
+                        type Value = #ty;
+
+                        fn deserialize<__D>(
+                            self,
+                            __deserializer: __D,
+                        ) -> ::core::result::Result<Self::Value, __D::Error>
+                        where
+                            __D: _serde::Deserializer<'de>,
+                        {
+                            let _ = self.state;
+                            #with::deserialize(__deserializer)
                         }
                     }
 

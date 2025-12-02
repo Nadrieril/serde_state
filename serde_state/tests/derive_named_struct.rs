@@ -154,10 +154,39 @@ mod counter_passthrough {
     }
 }
 
+mod generic_counter_passthrough {
+    use super::{GenericCounterValue, RecorderLike};
+    use serde::Deserialize;
+
+    pub fn serialize_state<S, State>(
+        value: &GenericCounterValue,
+        state: &State,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+        State: RecorderLike + ?Sized,
+    {
+        state.mark_serialized();
+        serializer.serialize_u32(value.0 + 100)
+    }
+
+    pub fn deserialize_state<'de, State, D>(
+        state: &State,
+        deserializer: D,
+    ) -> Result<GenericCounterValue, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+        State: RecorderLike + ?Sized,
+    {
+        state.mark_deserialized();
+        let stored = u32::deserialize(deserializer)?;
+        Ok(GenericCounterValue(stored - 100))
+    }
+}
+
 mod counter_vec_passthrough {
-    use serde::ser::SerializeSeq;
     use serde_state::{DeserializeState, SerializeState};
-    use std::marker::PhantomData;
 
     pub fn serialize_state<S, State: ?Sized, T>(
         values: &Vec<T>,
@@ -166,13 +195,9 @@ mod counter_vec_passthrough {
     ) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
-        T: SerializeState<State>,
+        Vec<T>: SerializeState<State>,
     {
-        let mut seq = serializer.serialize_seq(Some(values.len()))?;
-        for value in values {
-            seq.serialize_element(&serde_state::__private::wrap_serialize(value, state))?;
-        }
-        seq.end()
+        SerializeState::serialize_state(values, state, serializer)
     }
 
     pub fn deserialize_state<'de, State: ?Sized, T, D>(
@@ -181,41 +206,9 @@ mod counter_vec_passthrough {
     ) -> Result<Vec<T>, D::Error>
     where
         D: serde::Deserializer<'de>,
-        T: DeserializeState<'de, State>,
+        Vec<T>: DeserializeState<'de, State>,
     {
-        struct Visitor<'state, State: ?Sized, T> {
-            state: &'state State,
-            marker: PhantomData<T>,
-        }
-
-        impl<'de, 'state, State: ?Sized, T> serde::de::Visitor<'de> for Visitor<'state, State, T>
-        where
-            T: DeserializeState<'de, State>,
-        {
-            type Value = Vec<T>;
-
-            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                formatter.write_str("sequence of counter values")
-            }
-
-            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
-            where
-                A: serde::de::SeqAccess<'de>,
-            {
-                let mut values = Vec::new();
-                while let Some(value) = seq.next_element_seed(
-                    serde_state::__private::wrap_deserialize_seed::<T, State>(self.state),
-                )? {
-                    values.push(value);
-                }
-                Ok(values)
-            }
-        }
-
-        deserializer.deserialize_seq(Visitor {
-            state,
-            marker: PhantomData,
-        })
+        DeserializeState::deserialize_state(state, deserializer)
     }
 }
 
@@ -327,12 +320,11 @@ struct WithHelperField {
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
 #[serde_state(state_implements = RecorderLike)]
 struct TraitBoundWithHelper {
-    #[serde(with = "counter_passthrough")]
-    counter: CounterValue,
+    #[serde(with = "generic_counter_passthrough")]
+    counter: GenericCounterValue,
 }
 
 #[derive(SerializeState, DeserializeState, Debug, PartialEq)]
-#[serde_state(state_implements = RecorderLike)]
 struct VecWithHelpers {
     #[serde(with = "counter_vec_passthrough")]
     counters: Vec<GenericCounterValue>,
@@ -703,7 +695,7 @@ fn serde_with_calls_custom_helpers() {
 #[test]
 fn serde_with_fields_respect_state_bounds() {
     let value = TraitBoundWithHelper {
-        counter: CounterValue(9),
+        counter: GenericCounterValue(9),
     };
 
     let state = Recorder::default();
