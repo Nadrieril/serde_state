@@ -104,9 +104,10 @@ struct Renamed {
 
 ### Recursive structures
 
-Because this uses perfect derives, the derive macro causes trait errors on recursive types. To solve
-this, opt out of inference by specifying the state explicitly with
-`#[serde_state(state = Recorder)]` (or whichever state type you use). When the state is set manually
+Because this uses perfect derives, the derive macro causes trait errors on recursive types.
+To solve this, opt out of inference by specifying the state explicitly with
+`#[serde_state(state = MyState)]` or `#[serde_state(state_implements = HasMyState)]`.
+When the state is set manually
 the derive falls back to placing bounds on each type parameter instead of every field.
 
 ```rust
