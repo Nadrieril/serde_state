@@ -76,7 +76,7 @@ impl RecorderLike for GlobalRecorder {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 struct CounterValue(u32);
 
 #[derive(Clone, Debug, PartialEq)]
@@ -219,7 +219,7 @@ mod counter_vec_passthrough {
     }
 }
 
-#[derive(SerializeState, DeserializeState, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, SerializeState, DeserializeState, Debug, PartialEq)]
 struct Example {
     first: CounterValue,
     second: CounterValue,
@@ -797,4 +797,126 @@ fn recursive_enum_threads_state() {
     let decoded = CounterList::deserialize_state(&state, &mut deserializer).unwrap();
     assert_eq!(decoded, list);
     assert_eq!(state.deserialized.get(), 2);
+}
+
+#[test]
+fn postcard_named_struct_deserializes_from_seq_and_threads_state() {
+    let value = Example {
+        first: CounterValue(31),
+        second: CounterValue(32),
+    };
+
+    let ser_state = Recorder::default();
+    let bytes = postcard::to_allocvec(&serde_state::__private::wrap_serialize(&value, &ser_state))
+        .expect("postcard serialize named struct");
+    assert_eq!(ser_state.serialized.get(), 2);
+
+    let de_state = Recorder::default();
+    let mut deserializer = postcard::Deserializer::from_bytes(&bytes);
+    let decoded = Example::deserialize_state(&de_state, &mut deserializer)
+        .expect("postcard deserialize named struct");
+    assert_eq!(
+        deserializer.finalize().expect("postcard remainder").len(),
+        0
+    );
+    assert_eq!(decoded, value);
+    assert_eq!(de_state.deserialized.get(), 2);
+}
+
+#[test]
+fn postcard_enum_variants_deserialize_from_numeric_tags() {
+    fn round_trip(value: Action, expected_hits: usize) {
+        let ser_state = Recorder::default();
+        let bytes =
+            postcard::to_allocvec(&serde_state::__private::wrap_serialize(&value, &ser_state))
+                .expect("postcard serialize enum");
+        assert_eq!(ser_state.serialized.get(), expected_hits);
+
+        let de_state = Recorder::default();
+        let mut deserializer = postcard::Deserializer::from_bytes(&bytes);
+        let decoded = Action::deserialize_state(&de_state, &mut deserializer)
+            .expect("postcard deserialize enum");
+        assert_eq!(
+            deserializer.finalize().expect("postcard remainder").len(),
+            0
+        );
+        assert_eq!(decoded, value);
+        assert_eq!(de_state.deserialized.get(), expected_hits);
+    }
+
+    round_trip(Action::Idle, 0);
+    round_trip(Action::Reset(CounterValue(51)), 1);
+    round_trip(Action::Combine(CounterValue(52), CounterValue(53)), 2);
+    round_trip(
+        Action::Record {
+            first: CounterValue(54),
+            second: CounterValue(55),
+        },
+        2,
+    );
+}
+
+#[test]
+fn postcard_serialize_matches_serialize_state_for_auto_serde_container() {
+    let value = AutoSerdeContainer {
+        value: GenericCounterValue(123),
+    };
+    assert_postcard_serde_and_state_equal_with_counts(&value, 1);
+}
+
+#[test]
+fn postcard_serialize_matches_serialize_state_for_vec_of_auto_serde_container() {
+    let values = vec![
+        AutoSerdeContainer {
+            value: GenericCounterValue(7),
+        },
+        AutoSerdeContainer {
+            value: GenericCounterValue(8),
+        },
+    ];
+
+    assert_postcard_serde_and_state_equal_with_counts(&values, 2);
+}
+
+#[test]
+fn postcard_serialize_matches_serialize_state_for_multi_field_struct() {
+    let value = Example {
+        first: CounterValue(31),
+        second: CounterValue(32),
+    };
+
+    assert_postcard_serde_and_state_equal_with_counts(&value, 2);
+}
+
+fn assert_postcard_serde_and_state_equal_with_counts<T>(value: &T, expected_hits: usize)
+where
+    T: Serialize
+        + for<'de> Deserialize<'de>
+        + SerializeState<Recorder>
+        + for<'de> DeserializeState<'de, Recorder>
+        + PartialEq
+        + std::fmt::Debug,
+{
+    let serde_bytes = postcard::to_allocvec(value).expect("postcard serde serialize");
+
+    let ser_state = Recorder::default();
+    let state_bytes =
+        postcard::to_allocvec(&serde_state::__private::wrap_serialize(value, &ser_state))
+            .expect("postcard state serialize");
+    assert_eq!(ser_state.serialized_count(), expected_hits);
+    assert_eq!(serde_bytes, state_bytes);
+
+    let serde_decoded: T = postcard::from_bytes(&state_bytes).expect("postcard serde deserialize");
+    assert_eq!(&serde_decoded, value);
+
+    let de_state = Recorder::default();
+    let mut deserializer = postcard::Deserializer::from_bytes(&serde_bytes);
+    let state_decoded = T::deserialize_state(&de_state, &mut deserializer)
+        .expect("postcard state deserialize");
+    assert_eq!(
+        deserializer.finalize().expect("postcard remainder").len(),
+        0
+    );
+    assert_eq!(de_state.deserialized_count(), expected_hits);
+    assert_eq!(&state_decoded, value);
 }
