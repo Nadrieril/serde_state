@@ -1,8 +1,12 @@
+extern crate self as serde_state;
+
 use serde::ser::{SerializeSeq, SerializeTuple};
 use serde::Serialize;
 pub use serde_state_derive::{DeserializeState, SerializeState};
 use std::boxed::Box;
 use std::marker::PhantomData;
+
+mod ranges;
 
 pub trait SerializeState<State: ?Sized> {
     fn serialize_state<S>(&self, state: &State, serializer: S) -> Result<S::Ok, S::Error>
@@ -346,6 +350,7 @@ where
         })
     }
 }
+
 impl<State: ?Sized, A, B> SerializeState<State> for (A, B)
 where
     A: SerializeState<State>,

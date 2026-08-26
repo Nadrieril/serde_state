@@ -13,8 +13,7 @@ pub fn wrap_in_const(serde_path: Option<&syn::Path>, code: TokenStream) -> Token
     };
 
     let use_serde_state = quote! {
-        #[allow(unused_extern_crates, clippy::useless_attribute)]
-        extern crate serde_state as _serde_state;
+        use ::serde_state as _serde_state;
     };
 
     quote! {
