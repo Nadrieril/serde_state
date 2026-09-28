@@ -1,8 +1,8 @@
-extern crate self as serde_state;
+extern crate self as serde_state_perfect_derive;
 
 use serde::ser::{SerializeSeq, SerializeTuple};
 use serde::Serialize;
-pub use serde_state_derive::{DeserializeState, SerializeState};
+pub use serde_state_perfect_derive_derive::{DeserializeState, SerializeState};
 use std::boxed::Box;
 use std::marker::PhantomData;
 

@@ -1,11 +1,14 @@
 [package]
-name = "serde_state_derive"
-version = "1.0.0"
-authors = ["Guillaume Boisseau <nadrieril+git@gmail.com>"]
-edition = "2021"
+name = "serde_state_perfect_derive_derive"
+description = "Derive macros for serde_state_perfect_derive"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [lib]
-name = "serde_state_derive"
+name = "serde_state_perfect_derive_derive"
 proc-macro = true
 
 [dependencies]

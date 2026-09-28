@@ -1,9 +1,13 @@
 This crate provides traits and derive macros for stateful serde (de)serialization.
 
-This is based on [`serde_state`](https://github.com/Marwes/serde_state) but rewritten from scratch
+This is inspired by [`serde_state`](https://github.com/Marwes/serde_state) but rewritten from scratch
 to use perfect derive to avoid the need for explicit state annotations. Typical usage looks like:
 
 ```rust
+use serde::Deserialize;
+use serde_state_perfect_derive::{DeserializeState, SerializeState};
+use std::cell::Cell;
+
 #[derive(Default)]
 struct Recorder {
     serialized: Cell<usize>,
@@ -39,7 +43,7 @@ impl<'de> DeserializeState<'de, Recorder> for CounterValue {
 struct Example {
     first: CounterValue,
     second: CounterValue,
-    #[stateless] // use normal serde impls for this
+    #[serde_state(stateless)] // use normal serde impls for this
     third: usize,
 }
 

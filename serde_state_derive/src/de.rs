@@ -8,7 +8,7 @@ use crate::{
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::spanned::Spanned;
-use syn::{Data, DeriveInput, GenericParam, Generics, Type, parse_quote};
+use syn::{parse_quote, Data, DeriveInput, GenericParam, Generics, Type};
 
 pub fn expand_derive_deserialize(input: &DeriveInput) -> syn::Result<TokenStream> {
     if let Data::Union(u) = &input.data {

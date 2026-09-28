@@ -1,12 +1,15 @@
 [package]
-name = "serde_state"
-version = "1.0.0"
-authors = ["Guillaume Boisseau <nadrieril+git@gmail.com>"]
-edition = "2021"
+name = "serde_state_perfect_derive"
+description = "Stateful serde serialization and deserialization with perfect derive"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
-serde_state_derive = { version = "1", path = "../serde_state_derive" }
+serde_state_perfect_derive_derive = { version = "=1.0.0", path = "../serde_state_derive" }
 
 [dev-dependencies]
 serde_json = "1"

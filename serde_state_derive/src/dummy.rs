@@ -13,7 +13,7 @@ pub fn wrap_in_const(serde_path: Option<&syn::Path>, code: TokenStream) -> Token
     };
 
     let use_serde_state = quote! {
-        use ::serde_state as _serde_state;
+        use ::serde_state_perfect_derive as _serde_state;
     };
 
     quote! {

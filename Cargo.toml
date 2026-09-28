@@ -2,6 +2,20 @@
 members = ["serde_state", "serde_state_derive"]
 resolver = "2"
 
+[workspace.package]
+version = "1.0.0"
+authors = ["Guillaume Boisseau <nadrieril+git@gmail.com>"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Nadrieril/serde_state"
+
+[workspace.metadata.release]
+shared-version = true
+consolidate-commits = true
+pre-release-commit-message = "Release {{version}}"
+tag-name = "v{{version}}"
+tag-message = "Release {{version}}"
+
 [workspace.dependencies]
 proc-macro2 = { version = "1.0.74", default-features = false }
 quote = { version = "1.0.35", default-features = false }
